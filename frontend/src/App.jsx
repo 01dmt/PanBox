@@ -324,7 +324,7 @@ export default function App() {
     <div className="app-shell">
       <Sidebar view={view} onChange={changeView} stats={stats} />
       <div className="app-main">
-        <Topbar
+        {view !== "library" && <Topbar
           view={view}
           search={search}
           onSearch={(value) => {
@@ -340,7 +340,7 @@ export default function App() {
           config={config}
           syncing={syncing}
           onSync={handleSync}
-        />
+        />}
 
         {view !== "dashboard" && view !== "library" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
         {error ? (
