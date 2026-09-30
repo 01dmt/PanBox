@@ -48,15 +48,15 @@ export default function Topbar({
         <h1>{TITLES[view]}</h1>
       )}
 
-      <div className={`tmdb-state ${config?.tmdb_configured ? "connected" : "offline"}`}>
+      {view !== "library" ? <div className={`tmdb-state ${config?.tmdb_configured ? "connected" : "offline"}`}>
         {config?.tmdb_configured ? <CheckCircle2 size={17} /> : <CloudOff size={17} />}
         <div>
           <strong>{config?.tmdb_configured ? "TMDB 已连接" : "TMDB 未配置"}</strong>
           <span>{config?.tmdb_auth_mode === "bearer" ? "Bearer Token" : config?.tmdb_auth_mode === "api_key" ? "API Key" : "仅本地管理"}</span>
         </div>
-      </div>
+      </div> : null}
 
-      {dataView ? (
+      {dataView && view !== "library" ? (
         <button
           type="button"
           className="icon-command"

@@ -33,7 +33,7 @@ function parseJson(value, fallback = []) {
 }
 
 
-function SourceRow({ source }) {
+function SourceRow({ source, readOnly = false }) {
   const [copied, setCopied] = useState(false);
   const metadata = parseJson(source.metadata_json, {});
   const snapshot = metadata?.share_snapshot;
@@ -60,7 +60,7 @@ function SourceRow({ source }) {
         {searchNames.length ? <small className="source-match-hint">内容：{searchNames.slice(0, 2).join(" · ")}</small> : null}
         {snapshot?.status === "unavailable" ? <small className="source-unavailable">分享内容不可访问</small> : null}
       </div>
-      <div className="source-actions">
+      {!readOnly && <div className="source-actions">
       {source.source_type === "115" ? (
         <button type="button" className="icon-only" onClick={() => window.open(source.url, "_blank", "noopener,noreferrer")} title="打开 115 链接">
           <ExternalLink size={15} />
@@ -69,7 +69,7 @@ function SourceRow({ source }) {
         <button type="button" className="icon-only" onClick={copy} title="复制 ED2K 链接">
           {copied ? <Check size={15} /> : <Clipboard size={15} />}
         </button>
-      )}</div>
+      )}</div>}
     </div>
   );
 }
@@ -174,6 +174,7 @@ function ImdbEvidence({ lookup }) {
 
 
 export default function Inspector({
+  readOnly = false,
   item,
   sourceIds,
   loading,
@@ -264,11 +265,11 @@ export default function Inspector({
           <section className="inspector-section">
             <div className="section-title">
               <h3>本地元数据</h3>
-              <button type="button" className="text-command" onClick={() => setEditing((value) => !value)}>
+              {!readOnly && <button type="button" className="text-command" onClick={() => setEditing((value) => !value)}>
                 <Pencil size={14} />{editing ? "取消" : "编辑"}
-              </button>
+              </button>}
             </div>
-            {editing ? (
+            {!readOnly && editing ? (
               <form
                 className="edit-form"
                 onSubmit={(event) => {
@@ -290,7 +291,7 @@ export default function Inspector({
               <h3>来源记录 <span>{matchingSources?.length ?? 0}{matchingSources?.length < item.source_count ? ` / 共 ${item.source_count}` : ""}</span></h3>
             </div>
                     {item.media_type === "tv" ? <EpisodeResourceGroup key={item.id} sources={matchingSources} /> : <div className="source-list">
-              {visibleSources?.map((source) => <SourceRow source={source} key={source.id} />)}
+              {visibleSources?.map((source) => <SourceRow source={source} readOnly={readOnly} key={source.id} />)}
             </div>}
             {!matchingSources?.length ? <p className="source-empty">暂无符合条件的来源</p> : null}
             {item.media_type !== "tv" && matchingSources?.length > 6 ? (
@@ -300,9 +301,9 @@ export default function Inspector({
             ) : null}
           </section>
 
-          <ImdbEvidence lookup={item.imdb_lookup} />
+          {!readOnly && <ImdbEvidence lookup={item.imdb_lookup} />}
 
-          <section className="inspector-section candidate-section">
+          {!readOnly && <section className="inspector-section candidate-section">
             <div className="section-title">
               <h3>TMDB 匹配候选</h3>
               <div className="candidate-actions">
@@ -356,7 +357,7 @@ export default function Inspector({
                 <button type="submit" className="button" disabled={!tmdbConfigured || loading}>手动关联</button>
               </form>
             ) : null}
-          </section>
+          </section>}
         </div>
       ) : null}
     </aside>

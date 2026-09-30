@@ -342,7 +342,7 @@ export default function App() {
           onSync={handleSync}
         />
 
-        {view !== "dashboard" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
+        {view !== "dashboard" && view !== "library" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
         {error ? (
           <div className="message-banner error" role="alert">
             {error}
@@ -364,7 +364,7 @@ export default function App() {
             <CinematicFilters filters={filters} options={filterOptions} total={pageData.total} onChange={changeFilters} onReset={clearFilters} onMore={() => changeFilters({})} />
             <CinematicPosterGrid items={pageData.items} loading={loading} selectedId={selectedId} onSelect={(id) => { selectItem(id); setMobileInspectorOpen(true); }} page={pageData.page} pages={pageData.pages} total={pageData.total} pageSize={filters.pageSize} onPageChange={(page) => changeFilters({ page })} onPageSizeChange={(pageSize) => changeFilters({ pageSize })} onClearFilters={clearFilters} />
             {mobileInspectorOpen && <div className="cinema-drawer-backdrop" onClick={() => setMobileInspectorOpen(false)} />}
-            <div className={`cinema-drawer ${mobileInspectorOpen ? "open" : ""}`}><Inspector item={selectedItem} sourceIds={pageData.items.find((item) => item.id === selectedId)?.matched_source_ids} loading={detailLoading} tmdbConfigured={Boolean(config?.tmdb_configured)} mobileOpen={mobileInspectorOpen} onClose={() => setMobileInspectorOpen(false)} onSearch={handleSearchCandidates} onLink={handleLink} onReject={handleReject} onUnlink={handleUnlink} onUpdate={handleUpdate} /></div>
+            <div className={`cinema-drawer ${mobileInspectorOpen ? "open" : ""}`}><Inspector readOnly item={selectedItem} sourceIds={pageData.items.find((item) => item.id === selectedId)?.matched_source_ids} loading={detailLoading} tmdbConfigured={Boolean(config?.tmdb_configured)} mobileOpen={mobileInspectorOpen} onClose={() => setMobileInspectorOpen(false)} onSearch={handleSearchCandidates} onLink={handleLink} onReject={handleReject} onUnlink={handleUnlink} onUpdate={handleUpdate} /></div>
           </main>
         ) : DATA_VIEWS.has(view) ? (
           <>
