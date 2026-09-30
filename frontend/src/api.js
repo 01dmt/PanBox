@@ -21,6 +21,14 @@ export function getConfig() {
   return request("/api/config");
 }
 
+export function getIngestionConfig() {
+  return request("/api/v1/settings/ingestion");
+}
+
+export function saveIngestionConfig(apiKey) {
+  return request("/api/v1/settings/ingestion", { method: "POST", body: JSON.stringify({ api_key: apiKey }) });
+}
+
 export function getShareAudit() {
   return request("/api/share-audit");
 }

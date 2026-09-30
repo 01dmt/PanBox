@@ -844,6 +844,14 @@ select:focus-visible {
 .status-chip.status-error { color: var(--coral); background: var(--coral-soft); }
 
 .media-summary dl,
+.ingestion-key-label { display: grid; gap: 6px; margin-top: 14px; color: var(--muted); font-size: 12px; }
+.ingestion-key-label input { width: 100%; height: 36px; padding: 0 9px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; }
+.ingestion-key-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.ingestion-key-reveal { display: grid; gap: 9px; padding: 12px; margin-top: 14px; color: var(--amber); background: var(--amber-soft); border: 1px solid #f1dfbd; border-radius: 6px; font-size: 11px; }
+.ingestion-key-reveal code { overflow-wrap: anywhere; padding: 8px; color: var(--text); background: var(--surface); border-radius: 4px; }
+.ingestion-key-reveal > div { display: flex; align-items: center; gap: 10px; }
+.settings-feedback { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
+
 .settings-list {
   display: grid;
   gap: 5px;

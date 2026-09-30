@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import json
+import secrets
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote
@@ -22,6 +24,7 @@ from .share_audit import audit_status, pause_audit
 from .tmdb import TmdbClient, TmdbError, bulk_match, search_media
 
 DIST_DIR = ROOT_DIR / "frontend" / "dist"
+INGESTION_CONFIG_PATH = ROOT_DIR / "data" / "ingestion-config.json"
 
 
 def create_app(db_path=None, static_dir=None) -> FastAPI:
@@ -50,8 +53,25 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
         if not key or key != expected:
             raise HTTPException(401, "需要有效的 API Key。")
 
+    def _read_ingestion_key():
+        try:
+            if INGESTION_CONFIG_PATH.is_file():
+                payload = json.loads(INGESTION_CONFIG_PATH.read_text(encoding="utf-8"))
+                key = payload.get("api_key") if isinstance(payload, dict) else None
+                if isinstance(key, str) and key:
+                    return key, "file"
+        except (OSError, ValueError, TypeError):
+            pass
+        key = os.getenv("INGESTION_API_KEY", "")
+        return (key, "env") if key else ("", "none")
+
+    def _local_only(request: Request):
+        host = request.client.host if request.client else ""
+        if host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+            raise HTTPException(403, "此设置接口仅允许本机访问。")
+
     def require_ingestion_key(authorization: Optional[str]):
-        expected = os.getenv("INGESTION_API_KEY", "")
+        expected, _ = _read_ingestion_key()
         if not expected:
             raise HTTPException(503, "接收接口尚未配置 INGESTION_API_KEY。")
         if authorization != f"Bearer {expected}":
@@ -59,6 +79,32 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
 
     @app.get("/api/health")
     async def health(): return {"ok": True}
+
+    @app.get("/api/v1/settings/ingestion")
+    async def ingestion_config(request: Request):
+        _local_only(request)
+        _, source = _read_ingestion_key()
+        return {"configured": source != "none", "source": source}
+
+    @app.post("/api/v1/settings/ingestion")
+    async def save_ingestion_config(request: Request, body: dict[str, Any]):
+        _local_only(request)
+        key = body.get("api_key")
+        if not isinstance(key, str) or len(key.strip()) < 16:
+            raise HTTPException(400, "API Key 至少需要 16 个字符。")
+        INGESTION_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = INGESTION_CONFIG_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"api_key": key.strip()}, ensure_ascii=False) + "\n", encoding="utf-8")
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        temporary.replace(INGESTION_CONFIG_PATH)
+        try:
+            os.chmod(INGESTION_CONFIG_PATH, 0o600)
+        except OSError:
+            pass
+        return {"ok": True, "configured": True, "source": "file"}
 
     @app.get("/api/config")
     async def config():

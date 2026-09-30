@@ -3,6 +3,7 @@
 .venv/
 .venv-p115/
 data/*
+data/ingestion-config.json
 !data/.gitkeep
 data/*.db-shm
 data/*.db-wal
