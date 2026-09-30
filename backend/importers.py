@@ -9,6 +9,8 @@ from urllib.parse import unquote
 
 import wordninja
 
+from .recognition import parse as parse_recognition
+
 
 SHARE_URL_RE = re.compile(r"https://115(?:cdn)?\.com/s/[^\s\t]+", re.IGNORECASE)
 ED2K_RE = re.compile(
@@ -296,10 +298,14 @@ def parse_ed2k_link(link: str, raw_text: Optional[str] = None) -> Optional[Parse
     episode_match = SEASON_EPISODE_RE.search(stem)
     season_match = episode_match or SEASON_RE.search(stem)
     title, year = parse_release_title(filename)
+    # The reusable recognizer covers non-standard but common episode forms such
+    # as 1x02, Season 2, 第三集, and date-based episode names. Keep the mature
+    # importer parser as the first choice and use it only as a conservative fallback.
+    fallback = parse_recognition(filename)
 
-    season = int(season_match.group(1)) if season_match else None
-    episode = int(episode_match.group(2)) if episode_match else None
-    media_type = "tv" if season_match else "movie"
+    season = int(season_match.group(1)) if season_match else fallback.season
+    episode = int(episode_match.group(2)) if episode_match else fallback.episode
+    media_type = "tv" if season is not None or fallback.media_type == "tv" else "movie"
 
     quality_match = QUALITY_RE.search(stem)
     codec_match = CODEC_RE.search(stem)
