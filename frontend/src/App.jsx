@@ -15,6 +15,7 @@ import {
 import Sidebar from "./components/Sidebar";
 import Topbar from "./components/Topbar";
 import StatsBar from "./components/StatsBar";
+import Dashboard from "./components/Dashboard";
 import FilterToolbar from "./components/FilterToolbar";
 import MediaTable from "./components/MediaTable";
 import Inspector from "./components/Inspector";
@@ -338,7 +339,7 @@ export default function App() {
           onSync={handleSync}
         />
 
-        <ShareAuditStatus onSourcesChanged={handleAuditedSources} />
+        {view !== "dashboard" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
         {error ? (
           <div className="message-banner error" role="alert">
             {error}
@@ -351,6 +352,8 @@ export default function App() {
             <button type="button" onClick={() => setNotice("")} aria-label="关闭提示">×</button>
           </div>
         ) : null}
+
+        {view === "dashboard" ? <Dashboard stats={stats} onPending={() => changeView("pending")} /> : null}
 
         {DATA_VIEWS.has(view) ? (
           <>

@@ -2,6 +2,7 @@ import { CheckCircle2, CloudOff, RefreshCw, Search, X } from "lucide-react";
 
 
 const TITLES = {
+  dashboard: "仪表盘",
   library: "资料库",
   pending: "待匹配",
   duplicates: "多来源作品",

@@ -1,8 +1,9 @@
-import { CircleHelp, FolderInput, Library, Settings } from "lucide-react";
+import { CircleHelp, FolderInput, LayoutDashboard, Library, Settings } from "lucide-react";
 import { formatNumber } from "../lib/format";
 
 
 const ITEMS = [
+  { id: "dashboard", label: "仪表盘", icon: LayoutDashboard },
   { id: "library", label: "资料库", icon: Library },
   { id: "pending", label: "待匹配", icon: CircleHelp },
   { id: "imports", label: "导入", icon: FolderInput },
