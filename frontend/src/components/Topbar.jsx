@@ -23,9 +23,9 @@ export default function Topbar({
 }) {
   const dataView = ["library", "pending", "duplicates"].includes(view);
   return (
-    <header className="topbar">
+    <header className={`topbar ${view === "library" ? "topbar--library" : ""}`}>
       <div className="mobile-title">{TITLES[view]}</div>
-      {dataView ? (
+      {dataView && view !== "library" ? (
         <form className="global-search" role="search" aria-label="搜索缓存资源" onSubmit={(event) => {
           event.preventDefault();
           onSubmitSearch();
@@ -44,7 +44,7 @@ export default function Topbar({
             <Search size={18} aria-hidden="true" />
           </button>
         </form>
-      ) : (
+      ) : view === "library" ? null : (
         <h1>{TITLES[view]}</h1>
       )}
 

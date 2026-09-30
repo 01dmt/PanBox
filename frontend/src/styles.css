@@ -261,6 +261,13 @@ select:focus-visible {
   display: none;
 }
 
+.topbar--library {
+  grid-template-columns: 1fr auto auto;
+  justify-content: end;
+  min-height: 64px;
+  padding-block: 7px;
+}
+
 .global-search {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 32px 36px;
