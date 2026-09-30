@@ -26,6 +26,7 @@ from .repository import (
     get_media_by_tmdb_id,
 )
 from .schema import ROOT_DIR, init_db, resolve_db_path
+from . import ingestion
 from .tmdb import TmdbClient, TmdbError, bulk_match, search_media
 from .share115 import Share115Error, cleanup_cancelled_shares
 from .share_audit import audit_status, pause_audit
@@ -114,6 +115,15 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            if match := re.fullmatch(r"/api/v1/ingestion/messages/([A-Za-z0-9_-]+)", path):
+                if not self._ingestion_key_valid():
+                    return
+                event = ingestion.get_event(match.group(1), self.db_path)
+                if not event:
+                    self._error("接收记录不存在。", HTTPStatus.NOT_FOUND)
+                    return
+                self._json(event)
+                return
             if path == "/api/health":
                 self._json({"ok": True})
                 return
@@ -185,6 +195,11 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             path = urlparse(self.path).path
+            if path == "/api/v1/ingestion/messages":
+                if not self._ingestion_key_valid():
+                    return
+                self._json(ingestion.receive(self._body(), self.db_path), HTTPStatus.ACCEPTED)
+                return
             body = self._body()
 
             if path == "/api/import":
@@ -288,6 +303,17 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
             return
         traceback.print_exc()
         self._error("服务器处理请求时发生错误。", HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _ingestion_key_valid(self) -> bool:
+        expected = os.getenv("INGESTION_API_KEY", "")
+        provided = self.headers.get("Authorization", "")
+        if not expected:
+            self._error("接收接口尚未配置 INGESTION_API_KEY。", HTTPStatus.SERVICE_UNAVAILABLE)
+            return False
+        if not hmac.compare_digest(provided, f"Bearer {expected}"):
+            self._error("需要有效的接入凭据。", HTTPStatus.UNAUTHORIZED)
+            return False
+        return True
 
     def _public_api_key_valid(self) -> bool:
         expected = os.getenv("MEDIA_API_KEY", "")

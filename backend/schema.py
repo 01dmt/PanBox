@@ -58,6 +58,39 @@ CREATE TABLE IF NOT EXISTS imports (
 
 CREATE INDEX IF NOT EXISTS idx_import_sha ON imports(content_sha256);
 
+CREATE TABLE IF NOT EXISTS ingestion_events (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    service TEXT NOT NULL DEFAULT 'unknown',
+    channel_id TEXT,
+    channel_name TEXT,
+    message_id TEXT,
+    published_at TEXT,
+    raw_text TEXT NOT NULL,
+    raw_json TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    error TEXT,
+    media_ids_json TEXT NOT NULL DEFAULT '[]',
+    received_at TEXT NOT NULL,
+    processed_at TEXT,
+    UNIQUE(service, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ingestion_status ON ingestion_events(status, received_at);
+
+CREATE TABLE IF NOT EXISTS ingestion_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ingestion_id TEXT NOT NULL REFERENCES ingestion_events(id) ON DELETE CASCADE,
+    source_key TEXT,
+    provider TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'extracted',
+    media_id INTEGER REFERENCES media_items(id) ON DELETE SET NULL,
+    error TEXT,
+    UNIQUE(ingestion_id, source_key)
+);
+CREATE INDEX IF NOT EXISTS idx_ingestion_links_source ON ingestion_links(source_key);
+
 CREATE TABLE IF NOT EXISTS source_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
