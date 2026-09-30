@@ -101,15 +101,16 @@ def insert_source(
         connection.execute(
             """
             INSERT INTO source_records (
-                media_id, import_id, source_type, source_key, raw_label, raw_text,
+                media_id, import_id, source_type, provider, source_key, raw_label, raw_text,
                 url, filename, file_size, ed2k_hash, season, episode, parsed_year,
                 quality, codec, hdr, audio, release_group, metadata_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 media_id,
                 import_id,
                 source.source_type,
+                source.provider,
                 source.source_key,
                 source.raw_label,
                 source.raw_text,

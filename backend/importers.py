@@ -93,6 +93,7 @@ class ParsedSource:
     raw_label: str
     raw_text: str
     url: str
+    provider: str = "115"
     filename: Optional[str] = None
     file_size: Optional[int] = None
     ed2k_hash: Optional[str] = None
@@ -160,6 +161,7 @@ def parse_share_line(line: str) -> Optional[ParsedSource]:
 
     return ParsedSource(
         source_type="115",
+        provider="115",
         source_key=f"115:{url}",
         title=title,
         year=year,
@@ -318,6 +320,7 @@ def parse_ed2k_link(link: str, raw_text: Optional[str] = None) -> Optional[Parse
 
     return ParsedSource(
         source_type="ed2k",
+        provider="115",
         source_key=f"ed2k:{ed2k_hash}",
         title=title,
         year=year,

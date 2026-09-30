@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS source_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
     import_id INTEGER REFERENCES imports(id) ON DELETE SET NULL,
-    source_type TEXT NOT NULL CHECK (source_type IN ('115', 'ed2k')),
+    source_type TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '115',
     source_key TEXT NOT NULL UNIQUE,
     raw_label TEXT NOT NULL,
     raw_text TEXT NOT NULL,
@@ -136,4 +137,48 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
     with connect(path) as connection:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(SCHEMA)
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_records)")}
+        if "provider" not in columns:
+            connection.execute("ALTER TABLE source_records ADD COLUMN provider TEXT NOT NULL DEFAULT '115'")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_provider ON source_records(provider)")
+        table_sql = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='source_records'").fetchone()[0] or ""
+        if "source_type IN ('115', 'ed2k')" in table_sql:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.executescript("""
+                CREATE TABLE source_records_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+                    import_id INTEGER REFERENCES imports(id) ON DELETE SET NULL,
+                    source_type TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT '115',
+                    source_key TEXT NOT NULL UNIQUE,
+                    raw_label TEXT NOT NULL,
+                    raw_text TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    filename TEXT,
+                    file_size INTEGER,
+                    ed2k_hash TEXT,
+                    season INTEGER,
+                    episode INTEGER,
+                    parsed_year INTEGER,
+                    quality TEXT,
+                    codec TEXT,
+                    hdr TEXT,
+                    audio TEXT,
+                    release_group TEXT,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO source_records_v2 SELECT id, media_id, import_id, source_type, provider,
+                    source_key, raw_label, raw_text, url, filename, file_size, ed2k_hash, season,
+                    episode, parsed_year, quality, codec, hdr, audio, release_group, metadata_json, created_at
+                    FROM source_records;
+                DROP TABLE source_records;
+                ALTER TABLE source_records_v2 RENAME TO source_records;
+                CREATE INDEX IF NOT EXISTS idx_sources_media ON source_records(media_id);
+                CREATE INDEX IF NOT EXISTS idx_sources_type ON source_records(source_type);
+                CREATE INDEX IF NOT EXISTS idx_sources_provider ON source_records(provider);
+                CREATE INDEX IF NOT EXISTS idx_sources_episode ON source_records(media_id, season, episode);
+            """)
+            connection.execute("PRAGMA foreign_keys = ON")
     return path
