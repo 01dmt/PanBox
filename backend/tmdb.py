@@ -18,6 +18,7 @@ from .importers import (
     parse_release_title, parse_title_year, split_joined_title,
     SEASON_EPISODE_RE, SEASON_RE,
 )
+from .recognition import Candidate as RecognitionCandidate, Recognizer as ReusableRecognizer, parse as parse_recognition
 from .imdb import ImdbClient, ImdbError, IMDB_ID_RE, normalize_imdb_title
 from .repository import (
     get_media,
@@ -499,6 +500,77 @@ class TmdbClient:
             self._title_cache[key] = payload_titles(payload)
         return self._title_cache[key]
 
+    def _reusable_recognition(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        """Run the portable recognition chain as a conservative TMDB fallback.
+
+        The normal matcher still performs resource/cache evidence checks. This
+        adapter makes the reusable parser and mechanism available for names the
+        legacy context builder cannot resolve, without weakening those checks.
+        """
+        source = next((s for s in item.get("sources") or [] if s.get("filename")), None)
+        filename = (source or {}).get("filename") or item.get("title") or ""
+        main_dir = item.get("title") or ""
+        # Treat the library title as the stable directory context only when it
+        # is not a generic placeholder; the filename remains the primary input.
+        parsed = parse_recognition(filename, main_dir_name=main_dir)
+
+        client = self
+        class Host:
+            def search(self, title, media_type, year=None, season=None, episode=None):
+                path = f"/search/{media_type}"
+                params = {"query": title, "language": "zh-CN"}
+                if year:
+                    params["year" if media_type == "movie" else "first_air_date_year"] = year
+                payload = client.request(path, params)
+                rows = []
+                for row in payload.get("results", []):
+                    kind = row.get("media_type") or media_type
+                    if kind != media_type or not row.get("id"):
+                        continue
+                    rows.append(RecognitionCandidate(
+                        provider="tmdb", external_id=str(row["id"]),
+                        title=row.get("title") or row.get("name") or "未命名",
+                        media_type=kind, year=tmdb_year(row),
+                        original_title=row.get("original_title") or row.get("original_name"),
+                    ))
+                return rows
+
+            def fetch_by_id(self, tmdb_id, media_type):
+                payload = client.request(f"/{media_type}/{int(tmdb_id)}", {"language": "zh-CN"})
+                if payload.get("id") != int(tmdb_id):
+                    return None
+                return RecognitionCandidate(
+                    provider="tmdb", external_id=str(payload["id"]),
+                    title=payload.get("title") or payload.get("name") or "未命名",
+                    media_type=media_type, year=tmdb_year(payload),
+                    original_title=payload.get("original_title") or payload.get("original_name"),
+                )
+
+        result = ReusableRecognizer(
+            Host(),
+            options={"ai_recognition": False, "moviepilot_auxiliary": False},
+            thresholds={"auto_threshold": AUTO_LINK_SCORE, "ambiguity_margin": AUTO_LINK_MARGIN},
+        ).identify(filename, main_dir_name=main_dir)
+        if not result.selected:
+            return []
+        selected = result.selected
+        payload = self.request(f"/{selected.media_type}/{int(selected.external_id)}", {"language": "zh-CN"})
+        if not isinstance(payload, dict) or payload.get("id") is None:
+            return []
+        candidate = self._candidate(
+            item, payload, selected.media_type,
+            local_titles=[parsed.title, *[title for title, _ in parsed.query_variants]],
+            local_years=[parsed.year] if parsed.year else [],
+            search_hits=[{"query": parsed.title, "rank": 0, "year": parsed.year, "derived": False}],
+            explicit_match="explicit_tmdb" in parsed.evidence,
+            episodic=parsed.media_type == "tv",
+        )
+        candidate["match_evidence"]["reusable_recognition"] = True
+        candidate["match_evidence"]["recognition_evidence"] = list(
+            (selected.metadata.get("recognition") or {}).get("evidence") or []
+        )
+        return [candidate]
+
     def search(self, item: dict[str, Any]) -> list[dict[str, Any]]:
         context = collect_search_context(item)
         if not context.terms:
@@ -689,6 +761,11 @@ class TmdbClient:
             enrich_titles()
 
         candidates = matching_candidates(ranked())
+        if not candidates:
+            # Reuse the portable recognition chain for a second, fully scored
+            # path. It is intentionally last: existing resource evidence and
+            # language/year safeguards remain authoritative.
+            candidates = matching_candidates(self._reusable_recognition(item))
         return self.disambiguate_tv_episodes(candidates, context)[:12]
 
     def disambiguate_tv_episodes(
