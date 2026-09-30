@@ -595,7 +595,10 @@ def get_media(media_id: int, db_path: str | Path | None = None) -> dict[str, Any
         ).fetchone()
 
     result = dict(item)
-    result["sources"] = [dict(row) for row in sources]
+    result["sources"] = [
+        {**dict(row), "is_season_pack": row["season"] is not None and row["episode"] is None}
+        for row in sources
+    ]
     result["candidates"] = [dict(row) for row in candidates]
     result["imdb_lookup"] = json.loads(imdb_lookup["evidence_json"]) if imdb_lookup else None
     return result

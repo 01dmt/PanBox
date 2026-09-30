@@ -54,7 +54,7 @@ function SourceRow({ source }) {
         <span>
           {source.source_type}
           {source.file_size ? ` · ${formatBytes(source.file_size)}` : ""}
-          {source.season ? ` · S${String(source.season).padStart(2, "0")}E${String(source.episode).padStart(2, "0")}` : ""}
+          {source.season != null ? ` · S${String(source.season).padStart(2, "0")}${source.episode != null ? `E${String(source.episode).padStart(2, "0")}` : " · 整季"}` : ""}
         </span>
         <small>{source.source_type === "115" ? maskedSource(source.url) : source.ed2k_hash}</small>
         {searchNames.length ? <small className="source-match-hint">内容：{searchNames.slice(0, 2).join(" · ")}</small> : null}
@@ -72,6 +72,37 @@ function SourceRow({ source }) {
       )}</div>
     </div>
   );
+}
+
+
+function EpisodeResourceGroup({ sources }) {
+  const seasons = useMemo(() => {
+    const groups = new Map();
+    for (const source of sources || []) {
+      const numericSeason = source.season != null && !Number.isNaN(Number(source.season)) ? Number(source.season) : null;
+      const season = Number.isInteger(numericSeason) ? numericSeason : null;
+      const key = season === null ? "unknown" : String(season);
+      if (!groups.has(key)) groups.set(key, { season, packs: [], episodes: [] });
+      const group = groups.get(key);
+      if (source.episode == null) group.packs.push(source);
+      else group.episodes.push(source);
+    }
+    return [...groups.values()].sort((a, b) => (a.season ?? Infinity) - (b.season ?? Infinity));
+  }, [sources]);
+  const [active, setActive] = useState("0");
+  const group = seasons[Number(active)] || seasons[0];
+  useEffect(() => { if (seasons.length && Number(active) >= seasons.length) setActive("0"); }, [active, seasons.length]);
+  if (!seasons.length) return null;
+  return <div className="season-resources">
+    <div className="season-tabs" role="tablist" aria-label="选择季度">
+      {seasons.map((season, index) => <button key={String(season.season)} type="button" role="tab" aria-selected={String(index) === active} className={String(index) === active ? "active" : ""} onClick={() => setActive(String(index))}>
+        {season.season === null ? "未分类" : `第 ${season.season} 季`} <small>{season.packs.length ? `${season.packs.length} 整季` : ""}{season.packs.length && season.episodes.length ? " · " : ""}{season.episodes.length ? `${season.episodes.length} 集` : ""}</small>
+      </button>)}
+    </div>
+    {group?.packs.length ? <div className="season-resource-block"><h4>整季资源</h4>{group.packs.map((source) => <SourceRow source={source} key={source.id} />)}</div> : null}
+    {group?.episodes.length ? <div className="season-resource-block"><h4>单集资源</h4>{[...group.episodes].sort((a, b) => (a.episode ?? 0) - (b.episode ?? 0)).map((source) => <SourceRow source={source} key={source.id} />)}</div> : null}
+    {!group?.packs.length && !group?.episodes.length ? <p className="source-empty">该季暂无资源</p> : null}
+  </div>;
 }
 
 
@@ -258,11 +289,11 @@ export default function Inspector({
             <div className="section-title">
               <h3>来源记录 <span>{matchingSources?.length ?? 0}{matchingSources?.length < item.source_count ? ` / 共 ${item.source_count}` : ""}</span></h3>
             </div>
-            <div className="source-list">
+                    {item.media_type === "tv" ? <EpisodeResourceGroup key={item.id} sources={matchingSources} /> : <div className="source-list">
               {visibleSources?.map((source) => <SourceRow source={source} key={source.id} />)}
-            </div>
+            </div>}
             {!matchingSources?.length ? <p className="source-empty">暂无符合条件的来源</p> : null}
-            {matchingSources?.length > 6 ? (
+            {item.media_type !== "tv" && matchingSources?.length > 6 ? (
               <button type="button" className="show-more" onClick={() => setShowAllSources((value) => !value)}>
                 {showAllSources ? "收起来源" : `查看全部 ${matchingSources.length} 条来源`}<ChevronDown size={15} />
               </button>
