@@ -8,6 +8,7 @@ from pathlib import Path
 from backend.repository import import_file
 from backend.schema import ROOT_DIR, init_db, resolve_db_path
 from backend.server import serve
+from backend.fastapi_app import create_app
 from backend.tmdb import TmdbClient, bulk_match
 from backend.share_audit import audit_share_links
 
@@ -44,6 +45,7 @@ def parser() -> argparse.ArgumentParser:
     serve_command.add_argument("--host", default=os.getenv("MEDIA_HOST", "127.0.0.1"))
     serve_command.add_argument("--port", type=int, default=int(os.getenv("MEDIA_PORT", "8088")))
     serve_command.add_argument("--static-dir", help="前端构建目录")
+    serve_command.add_argument("--legacy", action="store_true", help="使用旧版标准库 HTTP 服务")
     return root
 
 
@@ -76,7 +78,11 @@ def main() -> None:
         return
 
     if args.command == "serve":
-        serve(args.host, args.port, db_path, args.static_dir)
+        if args.legacy:
+            serve(args.host, args.port, db_path, args.static_dir)
+            return
+        import uvicorn
+        uvicorn.run(create_app(db_path, args.static_dir), host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
