@@ -23,6 +23,9 @@ import ImportView from "./components/ImportView";
 import SettingsView from "./components/SettingsView";
 import MobileNav from "./components/MobileNav";
 import ShareAuditStatus from "./components/ShareAuditStatus";
+import LibraryHero from "./components/LibraryHero";
+import CinematicFilters from "./components/CinematicFilters";
+import CinematicPosterGrid from "./components/CinematicPosterGrid";
 
 
 const DATA_VIEWS = new Set(["library", "pending", "duplicates"]);
@@ -355,7 +358,15 @@ export default function App() {
 
         {view === "dashboard" ? <Dashboard stats={stats} onPending={() => changeView("pending")} /> : null}
 
-        {DATA_VIEWS.has(view) ? (
+        {view === "library" ? (
+          <main className="cinematic-library">
+            <LibraryHero item={pageData.items.find((item) => item.backdrop_path) || pageData.items[0]} onOpen={(id) => { selectItem(id); setMobileInspectorOpen(true); }} />
+            <CinematicFilters filters={filters} options={filterOptions} total={pageData.total} onChange={changeFilters} onReset={clearFilters} onMore={() => changeFilters({})} />
+            <CinematicPosterGrid items={pageData.items} loading={loading} selectedId={selectedId} onSelect={(id) => { selectItem(id); setMobileInspectorOpen(true); }} page={pageData.page} pages={pageData.pages} total={pageData.total} pageSize={filters.pageSize} onPageChange={(page) => changeFilters({ page })} onPageSizeChange={(pageSize) => changeFilters({ pageSize })} onClearFilters={clearFilters} />
+            {mobileInspectorOpen && <div className="cinema-drawer-backdrop" onClick={() => setMobileInspectorOpen(false)} />}
+            <div className={`cinema-drawer ${mobileInspectorOpen ? "open" : ""}`}><Inspector item={selectedItem} sourceIds={pageData.items.find((item) => item.id === selectedId)?.matched_source_ids} loading={detailLoading} tmdbConfigured={Boolean(config?.tmdb_configured)} mobileOpen={mobileInspectorOpen} onClose={() => setMobileInspectorOpen(false)} onSearch={handleSearchCandidates} onLink={handleLink} onReject={handleReject} onUnlink={handleUnlink} onUpdate={handleUpdate} /></div>
+          </main>
+        ) : DATA_VIEWS.has(view) ? (
           <>
             <StatsBar stats={stats} activeView={view} />
             <div className="workspace-grid">
