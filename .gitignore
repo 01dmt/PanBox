@@ -1,0 +1,12 @@
+.DS_Store
+.env
+.venv/
+.venv-p115/
+data/*
+!data/.gitkeep
+data/*.db-shm
+data/*.db-wal
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
