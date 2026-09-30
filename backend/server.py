@@ -51,7 +51,7 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
     def _headers(self, status: int, content_type: str, content_length: int | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-store" if content_type.startswith("application/json") else "public, max-age=60")
+        self.send_header("Cache-Control", "no-store" if content_type.startswith("application/json") else "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Key")

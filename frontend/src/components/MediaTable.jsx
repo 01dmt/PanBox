@@ -1,44 +1,33 @@
 import { useLayoutEffect, useRef } from "react";
 import {
-  AlertCircle,
-  CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  CircleHelp,
   Film,
 } from "lucide-react";
 import {
   displayMediaType,
   displayStatus,
-  formatDate,
   formatNumber,
   posterUrl,
   qualityList,
 } from "../lib/format";
 
 
-function Status({ value, confidence }) {
-  const Icon = value === "matched" ? CheckCircle2 : value === "error" || value === "not_found" ? AlertCircle : CircleHelp;
-  return (
-    <span className={`status status-${value || "pending"}`}>
-      <Icon size={15} />
-      <span>{displayStatus(value)}</span>
-      {confidence ? <small>{Math.round(confidence * 100)}%</small> : null}
-    </span>
-  );
+function LoadingRows() {
+  return <div className="poster-grid poster-grid-loading">{Array.from({ length: 12 }, (_, index) => <div className="poster-card-skeleton" key={index}><span className="skeleton" /><i className="skeleton" /><i className="skeleton short" /></div>)}</div>;
 }
 
-
-function LoadingRows() {
-  return Array.from({ length: 8 }, (_, index) => (
-    <div className="media-row skeleton-row" key={index}>
-      <span className="skeleton poster-skeleton" />
-      <span className="skeleton line wide" />
-      <span className="skeleton line" />
-      <span className="skeleton line" />
-      <span className="skeleton line" />
-    </div>
-  ));
+function MediaCard({ item, selectedId, onSelect }) {
+  const qualities = qualityList("matched_qualities" in item ? item.matched_qualities : item.qualities);
+  const matchingSources = item.matched_source_count ?? item.source_count;
+  const title = item.tmdb_title || item.title;
+  const year = item.media_year || item.year || item.release_date?.slice(0, 4) || "年份未知";
+  const episodeInfo = item.media_type === "tv" && (item.episode_count || item.max_season)
+    ? `${item.max_season ? `${item.max_season} 季` : ""}${item.max_season && item.episode_count ? " · " : ""}${item.episode_count ? `${item.episode_count} 集` : ""}` : null;
+  return <button type="button" className={`media-card ${selectedId === item.id ? "selected" : ""}`} aria-pressed={selectedId === item.id} onClick={() => onSelect(item.id)}>
+    <div className="media-card-poster"><img src={posterUrl(item.poster_path, "w342")} alt={title} loading="lazy" /><span className="media-card-type">{displayMediaType(item.media_type)}</span>{qualities[0] ? <span className="media-card-quality">{qualities[0]}</span> : null}<span className="media-card-rating">★ {item.vote_average ? Number(item.vote_average).toFixed(1) : "—"}</span></div>
+    <div className="media-card-meta"><strong title={title}>{title}</strong><span>{year} · {matchingSources ? `${formatNumber(matchingSources)} 个来源` : "无资源"}{episodeInfo ? ` · ${episodeInfo}` : ""}</span><small className={`card-status card-status-${item.tmdb_status || "pending"}`}>{displayStatus(item.tmdb_status)}</small></div>
+  </button>;
 }
 
 
@@ -74,14 +63,7 @@ export default function MediaTable({
 
   return (
     <div className="media-table-wrap" ref={tableRef}>
-      <div className="media-table-head" role="row">
-        <span>海报</span>
-        <span>标题 / 年份 / 类型</span>
-        <span>来源</span>
-        <span>质量</span>
-        <span>TMDB 状态</span>
-        <span>更新时间</span>
-      </div>
+      <div className="poster-wall-toolbar"><strong>共 {formatNumber(total)} 部</strong><span>点击海报查看资源详情</span></div>
       <div className="media-table-body" ref={bodyRef} role="region" aria-label="资源列表" aria-busy={loading} tabIndex={0}>
         {loading ? <LoadingRows /> : null}
         {!loading && !items.length ? (
@@ -91,51 +73,7 @@ export default function MediaTable({
             <button type="button" className="button small" onClick={onClearFilters}>清除筛选</button>
           </div>
         ) : null}
-        {!loading
-          ? items.map((item) => {
-              const qualities = qualityList("matched_qualities" in item ? item.matched_qualities : item.qualities);
-              const matchingSources = item.matched_source_count ?? item.source_count;
-              return (
-                <button
-                  type="button"
-                  className={`media-row ${selectedId === item.id ? "selected" : ""}`}
-                  key={item.id}
-                  onClick={() => onSelect(item.id)}
-                >
-                  <img
-                    className="poster-thumb"
-                    src={posterUrl(item.poster_path, "w185")}
-                    alt=""
-                    loading="lazy"
-                  />
-                  <span className="title-cell">
-                    <strong>{item.tmdb_title || item.title}</strong>
-                    <small>
-                      {item.media_year || item.year || item.release_date?.slice(0, 4) || "年份未知"}
-                      <i>·</i>
-                      {displayMediaType(item.media_type)}
-                    </small>
-                    {item.original_title && item.original_title !== item.tmdb_title ? (
-                      <em>{item.original_title}</em>
-                    ) : null}
-                  </span>
-                  <span className="source-cell">
-                    <strong>{item.source_count ? `${formatNumber(matchingSources)} 条来源` : "无资源"}</strong>
-                    <small>{matchingSources < item.source_count ? `符合筛选 / 共 ${formatNumber(item.source_count)} 条` : `115: ${formatNumber(item.source_115_count)} · ED2K: ${formatNumber(item.source_ed2k_count)}`}</small>
-                    {item.episode_count ? <em>{item.episode_count} 集 / {item.max_season || 1} 季</em> : null}
-                  </span>
-                  <span className="quality-cell">
-                    {qualities.length ? qualities.map((quality) => <small key={quality}>{quality}</small>) : <em>未识别</em>}
-                  </span>
-                  <span className="status-cell">
-                    <Status value={item.tmdb_status} confidence={item.match_confidence} />
-                    {item.tmdb_id ? <small>TMDB #{item.tmdb_id}</small> : null}
-                  </span>
-                  <span className="date-cell">{formatDate(item.updated_at)}</span>
-                </button>
-              );
-            })
-          : null}
+        {!loading ? <div className="poster-grid">{items.map((item) => <MediaCard item={item} selectedId={selectedId} onSelect={onSelect} key={item.id} />)}</div> : null}
       </div>
 
       <footer className="table-footer">
