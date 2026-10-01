@@ -17,6 +17,7 @@ PanBox 是本地优先的影视资料库，用于接收外部频道转发的资�
 - 在本地缓存 115 公开目录快照，使用目录文件名和季集覆盖范围辅助识别，但不下载或转存资源。
 - 设置页支持保存外部接入 Key，并将保存失败的接口错误直接反馈给用户；入库记录页显示今日数量、消息来源频道、来源渠道、入库媒体、状态和时间。
 - 入库记录页使用全宽历史列表，手动入库收敛为页面右上角单个按钮并通过弹窗打开；TMDB 连接状态保持为左下角的紧凑状态提示。
+- 入库记录支持点击查看单条消息明细，包括原始正文、提取出的来源链接、处理状态和接收 JSON，便于后续调整识别规则。
 
 明确不在项目范围内：
 
@@ -178,6 +179,7 @@ PanBox 是本地优先的影视资料库，用于接收外部频道转发的资�
 | GET | `/api/media/{id}` | 作品详情、来源和候选 |
 | POST | `/api/tmdb/sync` | 批量匹配待处理作品 |
 | GET | `/api/ingestion/records` | 入库记录和今日数量 |
+| GET | `/api/ingestion/records/{id}` | 查看单条入库消息明细 |
 | POST | `/api/v1/ingestion/messages` | 接收外部消息，需 Bearer Key |
 | GET | `/api/v1/ingestion/messages/{id}` | 查询单条接收记录，需 Bearer Key |
 | GET/POST | `/api/v1/settings/ingestion` | 本机读取或保存接入 Key |

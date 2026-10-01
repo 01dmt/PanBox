@@ -45,6 +45,10 @@ export function getIngestionRecords() {
   return request("/api/ingestion/records?limit=100");
 }
 
+export function getIngestionRecord(ingestionId) {
+  return request(`/api/ingestion/records/${encodeURIComponent(ingestionId)}`);
+}
+
 export function getMediaFilters() {
   return request("/api/media/filters");
 }

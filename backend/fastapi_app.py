@@ -101,6 +101,12 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
     @app.get("/api/ingestion/records")
     async def ingestion_records(limit: int = Query(100, ge=1, le=250)): return list_ingestion_records(limit, db())
 
+    @app.get("/api/ingestion/records/{ingestion_id}")
+    async def ingestion_record_detail(ingestion_id: str):
+        event = ingestion.get_event(ingestion_id, db())
+        if not event: raise HTTPException(404, "入库记录不存在。")
+        return event
+
     @app.get("/api/media/filters")
     async def media_filters(): return get_media_filters(db())
 

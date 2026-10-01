@@ -41,6 +41,7 @@ REJECT_CANDIDATE_RE = re.compile(r"^/api/media/(\d+)/candidates/(\d+)/reject$")
 LINK_RE = re.compile(r"^/api/media/(\d+)/tmdb/link$")
 UNLINK_RE = re.compile(r"^/api/media/(\d+)/tmdb/unlink$")
 PUBLIC_RESOURCES_RE = re.compile(r"^/api/media/tmdb/(\d+)/resources$")
+INGESTION_RECORD_RE = re.compile(r"^/api/ingestion/records/([A-Za-z0-9_-]+)$")
 
 
 class MediaRequestHandler(BaseHTTPRequestHandler):
@@ -163,6 +164,13 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/ingestion/records":
                 self._json(list_ingestion_records(int(_first(query, "limit", "100")), self.db_path))
+                return
+            if match := INGESTION_RECORD_RE.match(path):
+                event = ingestion.get_event(match.group(1), self.db_path)
+                if not event:
+                    self._error("入库记录不存在。", HTTPStatus.NOT_FOUND)
+                    return
+                self._json(event)
                 return
             if path == "/api/media/filters":
                 self._json(get_media_filters(self.db_path))

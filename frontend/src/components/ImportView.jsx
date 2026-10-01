@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, FolderInput, LoaderCircle, MessageCircle, Radio, UploadCloud } from "lucide-react";
-import { getIngestionRecords, importText } from "../api";
+import { CheckCircle2, Clipboard, ClipboardCheck, FolderInput, LoaderCircle, MessageCircle, Radio, UploadCloud, X } from "lucide-react";
+import { getIngestionRecord, getIngestionRecords, importText } from "../api";
 import { formatDateTime, formatNumber } from "../lib/format";
 
 const SOURCE_LABELS = { telegram: "Telegram", discord: "Discord", webhook: "Webhook" };
@@ -13,6 +13,9 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [selectedRecord, setSelectedRecord] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
   const inputRef = useRef(null);
 
   const refresh = useCallback(() => {
@@ -43,6 +46,26 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
     }
   };
 
+  const openRecord = async (record) => {
+    setDetailLoading(true);
+    setCopied(false);
+    setError("");
+    try {
+      setSelectedRecord(await getIngestionRecord(record.id));
+    } catch (nextError) {
+      setError(nextError.message);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const copyMessage = async () => {
+    if (!selectedRecord?.raw_text || !navigator.clipboard) return;
+    await navigator.clipboard.writeText(selectedRecord.raw_text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
+  };
+
   return (
     <main className="page-view import-view">
       <section className="import-history">
@@ -54,7 +77,7 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
         <div className="history-table">
           <div className="history-head ingestion-head"><span>消息来源频道</span><span>来源渠道</span><span>入库媒体</span><span>状态</span><span>时间</span></div>
           {records.map((item) => (
-            <div className="history-row" key={item.id}>
+            <button className="history-row history-row-button" type="button" key={item.id} onClick={() => openRecord(item)} aria-label={`查看 ${item.source_channel} 的消息明细`}>
               <span className="ingestion-channel">
                 {item.channel_avatar_url ? <img src={item.channel_avatar_url} alt="" loading="lazy" /> : <MessageCircle size={16} />}
                 <strong>{item.source_channel}</strong>
@@ -63,11 +86,54 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
               <span className="ingestion-media" title={item.media_titles?.join("、")}>{item.media_titles?.length ? item.media_titles.join("、") : "未识别媒体"}</span>
               <span className={`ingestion-status ingestion-status--${item.status}`}>{item.status === "imported" ? "已入库" : item.status === "duplicate" ? "重复" : item.status === "ignored" ? "已忽略" : item.status === "failed" ? "失败" : item.status}</span>
               <span>{formatDateTime(item.received_at)}</span>
-            </div>
+            </button>
           ))}
           {!records.length ? <div className="history-empty">尚无入库记录</div> : null}
         </div>
       </section>
+
+      {detailLoading ? (
+        <div className="record-detail-backdrop" role="presentation">
+          <section className="record-detail-modal record-detail-loading" role="dialog" aria-modal="true" aria-label="加载消息明细">
+            <LoaderCircle size={24} className="spin" />正在加载消息明细
+          </section>
+        </div>
+      ) : null}
+
+      {selectedRecord ? (
+        <div className="record-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedRecord(null); }}>
+          <section className="record-detail-modal" role="dialog" aria-modal="true" aria-labelledby="record-detail-title">
+            <header className="record-detail-head">
+              <div>
+                <span>入库消息明细</span>
+                <h2 id="record-detail-title">{selectedRecord.channel_name || selectedRecord.channel_id || "未知频道"}</h2>
+              </div>
+              <button type="button" className="icon-only" onClick={() => setSelectedRecord(null)} aria-label="关闭消息明细"><X size={17} /></button>
+            </header>
+            <div className="record-detail-meta">
+              <span>{SOURCE_LABELS[selectedRecord.service] || selectedRecord.service || "未知渠道"}</span>
+              <span>{selectedRecord.message_url || `消息 ID：${selectedRecord.message_id || "未知"}`}</span>
+              <span className={`ingestion-status ingestion-status--${selectedRecord.status}`}>{selectedRecord.status === "imported" ? "已入库" : selectedRecord.status === "duplicate" ? "重复" : selectedRecord.status === "ignored" ? "已忽略" : selectedRecord.status === "failed" ? "失败" : selectedRecord.status}</span>
+            </div>
+            <div className="record-detail-section">
+              <div className="record-detail-label"><strong>原始消息</strong><button type="button" className="button small" onClick={copyMessage} disabled={!selectedRecord.raw_text}>{copied ? <ClipboardCheck size={14} /> : <Clipboard size={14} />}{copied ? "已复制" : "复制"}</button></div>
+              <pre className="record-detail-message">{selectedRecord.raw_text || "（无原始消息）"}</pre>
+            </div>
+            <div className="record-detail-section">
+              <div className="record-detail-label"><strong>识别来源</strong><span>{selectedRecord.links?.length || 0} 条</span></div>
+              {selectedRecord.links?.length ? (
+                <div className="record-detail-links">
+                  {selectedRecord.links.map((link) => <div key={link.id || link.source_key}><span>{link.provider} · {link.status}</span><code>{link.url}</code></div>)}
+                </div>
+              ) : <p className="record-detail-empty">没有提取到 115 或 ED2K 来源。</p>}
+            </div>
+            <details className="record-detail-raw">
+              <summary>查看接收 JSON</summary>
+              <pre>{JSON.stringify(selectedRecord.raw_json, null, 2)}</pre>
+            </details>
+          </section>
+        </div>
+      ) : null}
 
       {manualOpen ? (
         <div className="manual-import-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCloseManual(); }}>
