@@ -416,7 +416,11 @@ def extract_tmdb_ids(value: str) -> list[int]:
     return [int(match.group(1)) for match in TMDB_ID_RE.finditer(unquote(value))]
 
 
-def parse_ed2k_link(link: str, raw_text: Optional[str] = None) -> Optional[ParsedSource]:
+def parse_ed2k_link(
+    link: str,
+    raw_text: Optional[str] = None,
+    context: str | None = None,
+) -> Optional[ParsedSource]:
     parts = link.split("|")
     if len(parts) < 6 or parts[1].lower() != "file":
         return None
@@ -458,6 +462,12 @@ def parse_ed2k_link(link: str, raw_text: Optional[str] = None) -> Optional[Parse
 
     release_group_match = re.search(r"-([A-Za-z0-9]+)$", stem)
 
+    context_value = re.sub(r"^\s*[📺🎬🍿🎞️]+\s*", "", context or "")
+    context_title, context_year = parse_title_year(context_value) if context else ("", None)
+    if context_title and context_title != "未命名" and not context_title.lower().startswith("链接"):
+        title = context_title
+        year = year or context_year
+
     return ParsedSource(
         source_type="ed2k",
         provider="115",
@@ -479,13 +489,29 @@ def parse_ed2k_link(link: str, raw_text: Optional[str] = None) -> Optional[Parse
         hdr=" + ".join(hdr_tags) if hdr_tags else None,
         audio=audio_match.group(1) if audio_match else None,
         release_group=release_group_match.group(1) if release_group_match else None,
+        metadata={"context": context} if context else {},
     )
 
 
+def _find_ed2k_heading(lines: list[str], index: int) -> str | None:
+    for previous in reversed(lines[:index]):
+        candidate = previous.strip()
+        if not candidate:
+            continue
+        if candidate.lower().startswith("ed2k://"):
+            continue
+        if candidate.startswith(("📺", "🎬")):
+            return candidate
+        break
+    return None
+
+
 def iter_ed2k_sources(content: str) -> Iterator[ParsedSource]:
-    for line in content.splitlines():
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        context = _find_ed2k_heading(lines, index)
         for match in ED2K_RE.finditer(line):
-            parsed = parse_ed2k_link(match.group(0), raw_text=line)
+            parsed = parse_ed2k_link(match.group(0), raw_text=line, context=context)
             if parsed:
                 yield parsed
 

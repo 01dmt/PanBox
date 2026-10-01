@@ -9,6 +9,7 @@ from typing import Any
 
 from .importers import detect_source_kind, iter_sources
 from .repository import import_content
+from .resource_pages import expand_resource_pages
 from .schema import connect, init_db
 from .tmdb import TmdbClient, TmdbError, search_media
 from .telegram_avatar import fetch_public_channel_avatar, normalize_channel_username
@@ -144,13 +145,14 @@ def process(ingestion_id: str, text: str, db_path=None) -> None:
                 (ingestion_id,),
             ).fetchone()
         event_source = dict(event_source_row) if event_source_row else {}
-        kind = detect_source_kind(text)
-        sources = list(iter_sources(text, kind))
+        expanded_text = expand_resource_pages(text)
+        kind = detect_source_kind(expanded_text)
+        sources = list(iter_sources(expanded_text, kind))
         if not sources:
             with connect(db_path) as db:
                 db.execute("UPDATE ingestion_events SET status='ignored', error=?, processed_at=? WHERE id=?", ("未提取到支持的 115 或 ED2K 资源。", _now(), ingestion_id))
             return
-        result = import_content(text, f"webhook:{ingestion_id}.txt", kind=kind, db_path=db_path)
+        result = import_content(expanded_text, f"webhook:{ingestion_id}.txt", kind=kind, db_path=db_path)
         inserted_keys = set(result.get("inserted_source_keys") or ())
         duplicate_keys = set(result.get("duplicate_source_keys") or ())
         error_keys = set(result.get("error_source_keys") or ())

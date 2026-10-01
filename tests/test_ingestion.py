@@ -128,6 +128,26 @@ class IngestionTests(unittest.TestCase):
             {"season": 1, "episode": None, "season_range": [1, 3]},
         ]), ["S1-S3"])
 
+    def test_telegraph_resource_page_sources_are_ingested_under_page_title(self) -> None:
+        page = (
+            "👤 陈百强\n📺 陈百强\n"
+            "ed2k://|file|陈百强03.zip|20|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/\n"
+            "ed2k://|file|陈百强02.zip|30|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|/\n"
+            "ed2k://|file|陈百强01.zip|40|CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC|/"
+        )
+        with patch("backend.ingestion.expand_resource_pages", return_value=page), patch("backend.ingestion.TmdbClient") as client_type:
+            client_type.return_value.configured = False
+            result = receive(
+                {"event_id": "telegraph-resource", "source": {"service": "telegram"}, "message": {"text": "👤 陈百强\n📎 查看资源 https://telegra.ph/chen-09-24"}},
+                self.db_path,
+            )
+            event = self.wait_for_status(result["id"])
+
+        self.assertEqual(event["status"], "imported")
+        self.assertEqual(len(event["links"]), 3)
+        records = list_ingestion_records(db_path=self.db_path)["items"][0]
+        self.assertEqual(records["media_titles"], ["陈百强"])
+
 
 if __name__ == "__main__":
     unittest.main()
