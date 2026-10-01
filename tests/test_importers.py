@@ -127,6 +127,13 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(source.hdr, "DV + HDR")
         self.assertEqual(source.release_group, "HiveWeb")
 
+    def test_parses_complete_multi_season_share(self) -> None:
+        source = parse_share_line(
+            "🎬 毒枭：墨西哥 (2018) S1-S3全集\thttps://115cdn.com/s/example?password=o599#"
+        )
+        self.assertEqual((source.title, source.year, source.season, source.episode), ("毒枭：墨西哥", 2018, 1, None))
+        self.assertEqual(source.metadata["season_range"], [1, 3])
+
     def test_extracts_multiple_ed2k_links_from_one_line(self) -> None:
         content = (
             "ed2k://|file|Show.S01E01.2026.1080p.WEB-DL.mkv|100|"

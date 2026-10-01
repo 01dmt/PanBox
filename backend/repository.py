@@ -717,9 +717,19 @@ def _format_ingestion_number_ranges(values: Iterable[int], prefix: str = "") -> 
 def _format_ingestion_episode_labels(rows: list[dict[str, Any]]) -> list[str]:
     episodes = sorted({(int(row["season"]), int(row["episode"])) for row in rows if row.get("season") is not None and row.get("episode") is not None})
     episode_labels = [f"S{season:02d}E{episode:02d}" for season, episode in episodes]
-    season_only = {int(row["season"]) for row in rows if row.get("season") is not None and row.get("episode") is None}
+    season_ranges = set()
+    covered_seasons = set()
+    for row in rows:
+        season_range = row.get("season_range")
+        if isinstance(season_range, (list, tuple)) and len(season_range) == 2:
+            start, end = int(season_range[0]), int(season_range[1])
+            if end > start:
+                season_ranges.add((start, end))
+                covered_seasons.update(range(start, end + 1))
+    season_only = {int(row["season"]) for row in rows if row.get("season") is not None and row.get("episode") is None} - covered_seasons
     episode_seasons = {season for season, _ in episodes}
-    season_labels = _format_ingestion_number_ranges(season_only - episode_seasons, prefix="S")
+    season_labels = [f"S{start}-S{end}" for start, end in sorted(season_ranges)]
+    season_labels.extend(_format_ingestion_number_ranges(season_only - episode_seasons, prefix="S"))
     return episode_labels + season_labels
 
 
@@ -741,7 +751,7 @@ def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) 
                    COALESCE(m.year, s.parsed_year, CASE
                        WHEN substr(m.release_date, 1, 4) GLOB '[12][0-9][0-9][0-9]'
                        THEN CAST(substr(m.release_date, 1, 4) AS INTEGER) END) AS media_year,
-                   s.season, s.episode
+                   s.season, s.episode, s.metadata_json
             FROM ingestion_links l
             LEFT JOIN media_items m ON m.id = l.media_id
             LEFT JOIN source_records s ON s.source_key = l.source_key
@@ -762,7 +772,20 @@ def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) 
             "year": link["media_year"],
             "_sources": [],
         })
-        media["_sources"].append({"season": link["season"], "episode": link["episode"]})
+        try:
+            source_metadata = json.loads(link["metadata_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            source_metadata = {}
+        if not source_metadata.get("season_range"):
+            context = str(source_metadata.get("context") or "")
+            range_match = re.search(r"(?i)\bS(\d{1,2})\s*[-~]\s*S?(\d{1,2})(?=$|\D)", context)
+            if range_match and int(range_match.group(2)) > int(range_match.group(1)):
+                source_metadata["season_range"] = [int(range_match.group(1)), int(range_match.group(2))]
+        media["_sources"].append({
+            "season": link["season"],
+            "episode": link["episode"],
+            "season_range": source_metadata.get("season_range"),
+        })
 
     items = []
     for event in events:

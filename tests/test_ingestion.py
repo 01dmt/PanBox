@@ -124,6 +124,9 @@ class IngestionTests(unittest.TestCase):
             {"season": 2, "episode": None},
             {"season": 3, "episode": None},
         ]), ["S1-S3"])
+        self.assertEqual(_format_ingestion_episode_labels([
+            {"season": 1, "episode": None, "season_range": [1, 3]},
+        ]), ["S1-S3"])
 
 
 if __name__ == "__main__":

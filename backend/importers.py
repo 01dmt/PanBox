@@ -40,6 +40,7 @@ SHARE_AUDIO_RE = re.compile(
     r"(?:\s*([0-9]+)(?:[.\s]+([0-9]+))?)?(?:[.\s]*(Atmos))?\b"
 )
 SHARE_EPISODE_RE = re.compile(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b")
+SHARE_SEASON_RANGE_RE = re.compile(r"(?i)\bS(\d{1,2})\s*[-~]\s*S?(\d{1,2})(?=$|\D)")
 SHARE_SEASON_RE = re.compile(r"(?i)\bS(\d{1,2})\b")
 SHARE_HEADER_YEAR_RE = re.compile(r"[\(\[（【]\s*((?:19|20)\d{2})\s*[\)\]）】]")
 SHARE_TECHNICAL_RE = re.compile(
@@ -173,7 +174,8 @@ def _share_heading_details(value: str) -> dict[str, object]:
     heading = re.sub(r"^\s*[📺🎬🍿🎞️]+\s*", "", heading)
     year_match = SHARE_HEADER_YEAR_RE.search(heading) or YEAR_RE.search(heading)
     episode_match = SHARE_EPISODE_RE.search(heading)
-    season_match = episode_match or SHARE_SEASON_RE.search(heading)
+    season_range_match = SHARE_SEASON_RANGE_RE.search(heading)
+    season_match = episode_match or season_range_match or SHARE_SEASON_RE.search(heading)
     quality_match = QUALITY_RE.search(heading)
     technical_match = SHARE_TECHNICAL_RE.search(heading)
 
@@ -183,6 +185,7 @@ def _share_heading_details(value: str) -> dict[str, object]:
     year = int(year_match.group(1)) if year_match else None
     season = int(season_match.group(1)) if season_match else None
     episode = int(episode_match.group(2)) if episode_match else None
+    season_end = int(season_range_match.group(2)) if season_range_match else None
 
     audio_match = SHARE_AUDIO_RE.search(heading)
     audio = None
@@ -215,6 +218,7 @@ def _share_heading_details(value: str) -> dict[str, object]:
         "title": title,
         "year": year,
         "season": season,
+        "season_end": season_end if season_end and season_end > season else None,
         "episode": episode,
         "media_type": media_type,
         "quality": quality_match.group(1).upper() if quality_match else None,
@@ -256,15 +260,12 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
         # Preserve the established one-line format while extracting episode and
         # technical metadata when it is present beside the URL.
         title, year = parse_title_year(label)
-        episode_match = SHARE_EPISODE_RE.search(label)
-        season_match = episode_match or SHARE_SEASON_RE.search(label)
-        details.update({
-            "title": title,
-            "year": year,
-            "season": int(season_match.group(1)) if season_match else None,
-            "episode": int(episode_match.group(2)) if episode_match else None,
-            "media_type": infer_share_media_type(title, f"{label} {suffix}"),
-        })
+        if details.get("season") is None and details.get("episode") is None:
+            details.update({
+                "title": title,
+                "year": year,
+                "media_type": infer_share_media_type(title, f"{label} {suffix}"),
+            })
     details["media_type"] = "tv" if details.get("season") is not None or details.get("episode") is not None else details["media_type"]
 
     return ParsedSource(
@@ -290,6 +291,7 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
             key: value
             for key, value in {
                 "context": heading,
+                "season_range": [details["season"], details["season_end"]] if details.get("season_end") else None,
                 "media_info": details.get("media_info"),
                 "extra": suffix,
             }.items()
