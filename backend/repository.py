@@ -698,6 +698,31 @@ def list_imports(limit: int = 50, db_path: str | Path | None = None) -> list[dic
     return [dict(row) for row in rows]
 
 
+def _format_ingestion_number_ranges(values: Iterable[int], prefix: str = "") -> list[str]:
+    numbers = sorted({int(value) for value in values})
+    if not numbers:
+        return []
+    ranges: list[str] = []
+    start = previous = numbers[0]
+    for number in numbers[1:]:
+        if number == previous + 1:
+            previous = number
+            continue
+        ranges.append(f"{prefix}{start}-{prefix}{previous}" if start != previous else f"{prefix}{start}")
+        start = previous = number
+    ranges.append(f"{prefix}{start}-{prefix}{previous}" if start != previous else f"{prefix}{start}")
+    return ranges
+
+
+def _format_ingestion_episode_labels(rows: list[dict[str, Any]]) -> list[str]:
+    episodes = sorted({(int(row["season"]), int(row["episode"])) for row in rows if row.get("season") is not None and row.get("episode") is not None})
+    episode_labels = [f"S{season:02d}E{episode:02d}" for season, episode in episodes]
+    season_only = {int(row["season"]) for row in rows if row.get("season") is not None and row.get("episode") is None}
+    episode_seasons = {season for season, _ in episodes}
+    season_labels = _format_ingestion_number_ranges(season_only - episode_seasons, prefix="S")
+    return episode_labels + season_labels
+
+
 def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) -> dict[str, Any]:
     """Return webhook intake records with channel, provider and media details."""
     bounded_limit = min(max(limit, 1), 250)
@@ -712,23 +737,32 @@ def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) 
         links = connection.execute(
             """
             SELECT l.ingestion_id, l.status AS link_status, l.provider,
-                   m.id AS media_id, COALESCE(m.tmdb_title, m.title) AS media_title
+                   m.id AS media_id, COALESCE(m.tmdb_title, m.title) AS media_title,
+                   COALESCE(m.year, s.parsed_year, CASE
+                       WHEN substr(m.release_date, 1, 4) GLOB '[12][0-9][0-9][0-9]'
+                       THEN CAST(substr(m.release_date, 1, 4) AS INTEGER) END) AS media_year,
+                   s.season, s.episode
             FROM ingestion_links l
             LEFT JOIN media_items m ON m.id = l.media_id
+            LEFT JOIN source_records s ON s.source_key = l.source_key
             WHERE l.ingestion_id IN (SELECT id FROM ingestion_events ORDER BY received_at DESC LIMIT ?)
             ORDER BY l.id
             """,
             (bounded_limit,),
         ).fetchall()
 
-    media_by_event: dict[str, list[dict[str, Any]]] = {}
+    media_by_event: dict[str, dict[int, dict[str, Any]]] = {}
     for link in links:
         if link["media_id"] is None:
             continue
-        media_by_event.setdefault(link["ingestion_id"], []).append({
+        event_media = media_by_event.setdefault(link["ingestion_id"], {})
+        media = event_media.setdefault(int(link["media_id"]), {
             "id": int(link["media_id"]),
             "title": link["media_title"],
+            "year": link["media_year"],
+            "_sources": [],
         })
+        media["_sources"].append({"season": link["season"], "episode": link["episode"]})
 
     items = []
     for event in events:
@@ -737,9 +771,17 @@ def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) 
         item["source_channel"] = item.get("channel_name") or item.get("channel_id") or "未知频道"
         item["source_username"] = item.get("channel_username")
         item["source_service"] = item.get("service") or "未知渠道"
-        seen = set()
-        item["media"] = [row for row in media_by_event.get(item["id"], []) if not (row["id"] in seen or seen.add(row["id"]))]
-        item["media_titles"] = [row["title"] for row in item["media"] if row["title"]]
+        media_details = []
+        for media in media_by_event.get(item["id"], {}).values():
+            episode_labels = _format_ingestion_episode_labels(media.pop("_sources"))
+            title = media.get("title") or "未识别媒体"
+            display_title = f"{title}（{media['year']}）" if media.get("year") else title
+            media["episode_labels"] = episode_labels
+            media["display"] = " · ".join([display_title, *episode_labels]) if episode_labels else display_title
+            media_details.append(media)
+        item["media"] = media_details
+        item["media_details"] = media_details
+        item["media_titles"] = [row["display"] for row in media_details]
         items.append(item)
     return {"items": items, "today_count": int(today_count or 0), "total": len(items)}
 

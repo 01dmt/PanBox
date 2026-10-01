@@ -8,6 +8,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from backend.ingestion import get_event, receive
+from backend.repository import _format_ingestion_episode_labels, list_ingestion_records
 from backend.schema import connect
 
 
@@ -104,6 +105,25 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(event["channel_username"], "ExampleChannel")
         self.assertEqual(event["message_url"], "https://t.me/ExampleChannel/1")
         self.assertEqual(event["channel_avatar_url"], "https://cdn5.telesco.pe/file/avatar.jpg")
+
+    def test_ingestion_records_include_media_year_and_episode_labels(self) -> None:
+        text = (
+            "📺 征途 (2026) S01E14 4K\n🔗 链接： https://115cdn.com/s/detail-one?password=x\n"
+            "📺 征途 (2026) S02E01 4K\n🔗 链接： https://115cdn.com/s/detail-two?password=x"
+        )
+        with patch("backend.ingestion.TmdbClient") as client_type:
+            client_type.return_value.configured = False
+            result = receive({"event_id": "record-labels", "source": {"service": "telegram"}, "message": {"text": text}}, self.db_path)
+            event = self.wait_for_status(result["id"])
+
+        self.assertEqual(event["status"], "imported")
+        record = list_ingestion_records(db_path=self.db_path)["items"][0]
+        self.assertEqual(record["media_titles"], ["征途（2026） · S01E14 · S02E01"])
+        self.assertEqual(_format_ingestion_episode_labels([
+            {"season": 1, "episode": None},
+            {"season": 2, "episode": None},
+            {"season": 3, "episode": None},
+        ]), ["S1-S3"])
 
 
 if __name__ == "__main__":
