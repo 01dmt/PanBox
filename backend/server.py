@@ -19,6 +19,7 @@ from .repository import (
     get_stats,
     import_content,
     link_tmdb,
+    list_ingestion_records,
     list_imports,
     list_media,
     unlink_tmdb,
@@ -27,6 +28,7 @@ from .repository import (
 )
 from .schema import ROOT_DIR, init_db, resolve_db_path
 from . import ingestion
+from .ingestion_config import INGESTION_CONFIG_PATH, read_ingestion_key, save_ingestion_key
 from .tmdb import TmdbClient, TmdbError, bulk_match, search_media
 from .share115 import Share115Error, cleanup_cancelled_shares
 from .share_audit import audit_status, pause_audit
@@ -127,6 +129,12 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/health":
                 self._json({"ok": True})
                 return
+            if path == "/api/v1/settings/ingestion":
+                if not self._settings_local():
+                    return
+                _, source = read_ingestion_key(INGESTION_CONFIG_PATH)
+                self._json({"configured": source != "none", "source": source})
+                return
             if path == "/api/config":
                 tmdb = TmdbClient()
                 self._json(
@@ -152,6 +160,9 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/imports":
                 self._json({"items": list_imports(int(_first(query, "limit", "50")), self.db_path)})
+                return
+            if path == "/api/ingestion/records":
+                self._json(list_ingestion_records(int(_first(query, "limit", "100")), self.db_path))
                 return
             if path == "/api/media/filters":
                 self._json(get_media_filters(self.db_path))
@@ -199,6 +210,17 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
                 if not self._ingestion_key_valid():
                     return
                 self._json(ingestion.receive(self._body(), self.db_path), HTTPStatus.ACCEPTED)
+                return
+            if path == "/api/v1/settings/ingestion":
+                if not self._settings_local():
+                    return
+                body = self._body()
+                try:
+                    save_ingestion_key(body.get("api_key"), INGESTION_CONFIG_PATH)
+                except (TypeError, ValueError) as exc:
+                    self._error(str(exc), HTTPStatus.BAD_REQUEST)
+                    return
+                self._json({"ok": True, "configured": True, "source": "file"})
                 return
             body = self._body()
 
@@ -305,7 +327,7 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
         self._error("服务器处理请求时发生错误。", HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _ingestion_key_valid(self) -> bool:
-        expected = os.getenv("INGESTION_API_KEY", "")
+        expected, _ = read_ingestion_key(INGESTION_CONFIG_PATH)
         provided = self.headers.get("Authorization", "")
         if not expected:
             self._error("接收接口尚未配置 INGESTION_API_KEY。", HTTPStatus.SERVICE_UNAVAILABLE)
@@ -314,6 +336,17 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
             self._error("需要有效的接入凭据。", HTTPStatus.UNAUTHORIZED)
             return False
         return True
+
+    def _settings_local(self) -> bool:
+        """Keep credential management available only from the local UI."""
+        try:
+            host = urlparse("http://" + self.headers.get("Host", ""))
+            valid = self.client_address[0] in {"127.0.0.1", "::1"} and host.hostname in {"127.0.0.1", "localhost", "::1"}
+        except ValueError:
+            valid = False
+        if not valid:
+            self._error("此设置接口仅允许本机访问。", HTTPStatus.FORBIDDEN)
+        return valid
 
     def _public_api_key_valid(self) -> bool:
         expected = os.getenv("MEDIA_API_KEY", "")

@@ -137,6 +137,67 @@ def insert_source(
         raise
 
 
+def _refresh_duplicate_source(
+    connection: sqlite3.Connection,
+    source_id: int,
+    source: ParsedSource,
+) -> None:
+    """Refresh parser-derived fields when a previously imported source improves."""
+    row = connection.execute(
+        """
+        SELECT s.media_id, m.tmdb_id, m.tmdb_status, m.media_type
+        FROM source_records s
+        JOIN media_items m ON m.id = s.media_id
+        WHERE s.id = ?
+        """,
+        (source_id,),
+    ).fetchone()
+    if not row:
+        return
+
+    old_media_id = int(row["media_id"])
+    media_id = old_media_id
+    # A parser correction may move an old unknown placeholder into the proper
+    # work. Never move a source that already has an explicit or TMDB identity.
+    if row["tmdb_id"] is None and row["tmdb_status"] != "matched" and row["media_type"] == "unknown":
+        media_id = ensure_media(connection, source)
+
+    connection.execute(
+        """
+        UPDATE source_records
+        SET media_id = ?, raw_label = ?, season = ?, episode = ?, parsed_year = ?,
+            quality = ?, codec = ?, hdr = ?, audio = ?, release_group = ?, metadata_json = ?
+        WHERE id = ?
+        """,
+        (
+            media_id,
+            source.raw_label,
+            source.season,
+            source.episode,
+            source.year,
+            source.quality,
+            source.codec,
+            source.hdr,
+            source.audio,
+            source.release_group,
+            json.dumps(source.metadata, ensure_ascii=False),
+            source_id,
+        ),
+    )
+
+    # Remove an empty placeholder work created by the old parser, but only when
+    # it has no confirmed identity or remaining sources.
+    if old_media_id != media_id:
+        connection.execute(
+            """
+            DELETE FROM media_items
+            WHERE id = ? AND tmdb_id IS NULL AND tmdb_status != 'matched'
+              AND NOT EXISTS (SELECT 1 FROM source_records WHERE media_id = media_items.id)
+            """,
+            (old_media_id,),
+        )
+
+
 def remove_cancelled_source(
     source_id: int,
     expected_url: str,
@@ -189,6 +250,9 @@ def import_content(
     digest = content_digest(content)
     now = utc_now()
     total = inserted = duplicates = errors = 0
+    inserted_source_keys: list[str] = []
+    duplicate_source_keys: list[str] = []
+    error_source_keys: list[str] = []
 
     with connect(db_path) as connection:
         cursor = connection.execute(
@@ -205,18 +269,24 @@ def import_content(
             total += 1
             try:
                 # Parser upgrades must not create empty works for an already imported source.
-                if connection.execute(
-                    "SELECT 1 FROM source_records WHERE source_key = ?", (source.source_key,)
-                ).fetchone():
+                existing = connection.execute(
+                    "SELECT id FROM source_records WHERE source_key = ?", (source.source_key,)
+                ).fetchone()
+                if existing:
                     duplicates += 1
+                    duplicate_source_keys.append(source.source_key)
+                    _refresh_duplicate_source(connection, int(existing["id"]), source)
                     continue
                 media_id = ensure_media(connection, source)
                 if insert_source(connection, media_id, import_id, source):
                     inserted += 1
+                    inserted_source_keys.append(source.source_key)
                 else:
                     duplicates += 1
+                    duplicate_source_keys.append(source.source_key)
             except Exception:
                 errors += 1
+                error_source_keys.append(source.source_key)
 
         connection.execute(
             """
@@ -236,6 +306,9 @@ def import_content(
         "inserted": inserted,
         "duplicates": duplicates,
         "errors": errors,
+        "inserted_source_keys": inserted_source_keys,
+        "duplicate_source_keys": duplicate_source_keys,
+        "error_source_keys": error_source_keys,
     }
 
 
@@ -623,6 +696,52 @@ def list_imports(limit: int = 50, db_path: str | Path | None = None) -> list[dic
             (min(max(limit, 1), 250),),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) -> dict[str, Any]:
+    """Return webhook intake records with channel, provider and media details."""
+    bounded_limit = min(max(limit, 1), 250)
+    with connect(db_path) as connection:
+        events = connection.execute(
+            "SELECT * FROM ingestion_events ORDER BY received_at DESC LIMIT ?",
+            (bounded_limit,),
+        ).fetchall()
+        today_count = connection.execute(
+            "SELECT COUNT(*) AS total FROM ingestion_events WHERE date(received_at, 'localtime') = date('now', 'localtime')",
+        ).fetchone()["total"]
+        links = connection.execute(
+            """
+            SELECT l.ingestion_id, l.status AS link_status, l.provider,
+                   m.id AS media_id, COALESCE(m.tmdb_title, m.title) AS media_title
+            FROM ingestion_links l
+            LEFT JOIN media_items m ON m.id = l.media_id
+            WHERE l.ingestion_id IN (SELECT id FROM ingestion_events ORDER BY received_at DESC LIMIT ?)
+            ORDER BY l.id
+            """,
+            (bounded_limit,),
+        ).fetchall()
+
+    media_by_event: dict[str, list[dict[str, Any]]] = {}
+    for link in links:
+        if link["media_id"] is None:
+            continue
+        media_by_event.setdefault(link["ingestion_id"], []).append({
+            "id": int(link["media_id"]),
+            "title": link["media_title"],
+        })
+
+    items = []
+    for event in events:
+        item = dict(event)
+        item["media_ids"] = json.loads(item.pop("media_ids_json") or "[]")
+        item["source_channel"] = item.get("channel_name") or item.get("channel_id") or "未知频道"
+        item["source_username"] = item.get("channel_username")
+        item["source_service"] = item.get("service") or "未知渠道"
+        seen = set()
+        item["media"] = [row for row in media_by_event.get(item["id"], []) if not (row["id"] in seen or seen.add(row["id"]))]
+        item["media_titles"] = [row["title"] for row in item["media"] if row["title"]]
+        items.append(item)
+    return {"items": items, "today_count": int(today_count or 0), "total": len(items)}
 
 
 def update_media_fields(

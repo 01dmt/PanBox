@@ -2,7 +2,7 @@
 
 本文描述当前 FastAPI 实现，供其他项目转发原始影视资源消息使用。外部项目不需要提前解析标题、网盘链接或 TMDB ID。
 
-> 重要：当前版本完成原始消息保存、115/ED2K 文本提取及资源导入。接收后台不会自动执行 TMDB 匹配；`imported` 不代表已完成影视识别或链接存活性验证。请同时阅读文末“当前实现边界”。
+> 重要：当前版本完成原始消息保存、115/ED2K 文本提取、资源导入及后台 TMDB 匹配。`imported` 表示来源已写入；TMDB 匹配在同一个后台处理流程中继续执行，结果以媒体记录的 `tmdb_status` 为准。它不代表链接存活性验证已完成。请同时阅读文末“当前实现边界”。
 
 ## 1. 地址与端口
 
@@ -96,7 +96,9 @@ Content-Type: application/json
     "service": "telegram",
     "channel_id": "-1001234567890",
     "channel_name": "示例影视频道",
+    "channel_username": "example_channel",
     "message_id": "456",
+    "message_url": "https://t.me/example_channel/456",
     "published_at": "2026-09-30T10:14:02Z"
   },
   "message": {
@@ -118,13 +120,17 @@ Content-Type: application/json
 | `source.service` | string | 否 | 稳定的发送服务标识，默认 `unknown`；参与消息去重 |
 | `source.channel_id` | string | 否 | 频道或群组 ID |
 | `source.channel_name` | string | 否 | 展示名称 |
+| `source.channel_username` | string | 否 | 公开频道用户名，可带或不带 `@`；用于尝试获取公开频道头像 |
 | `source.message_id` | string | 否 | 原消息 ID，建议转成字符串 |
+| `source.message_url` | string | 否 | 原消息链接 |
 | `source.published_at` | string | 否 | 建议 ISO 8601 时间；当前只保存，不严格验证格式 |
 | `message.text` | string | 与其他文本形式任选一种 | 完整消息正文 |
 | `message.caption` | string | 否 | 图片/视频附带的文本，正文为空时使用 |
 | `message.raw` | JSON | 否 | 额外原始消息数据，仅保存，不参与链接提取 |
 
 也兼容 `message` 直接为字符串，或顶层 `text` / `caption`。建议新项目统一使用 `message.text`。
+
+如果提供 `source.channel_username`，PanBox 会尝试从 Telegram 公开频道预览页获取头像 CDN 地址并按用户名复用缓存。私有频道、没有公开头像或 Telegram 预览页不可访问时，记录仍会正常入库，只是不显示头像。
 
 文本选取顺序为：非空的 `message` 字符串 → `message.text` → `message.caption` → 顶层 `text` → 顶层 `caption`。只处理首个可用文本，不会拼接正文与 caption；如两者都有重要内容，请发送方合为一个 `message.text`。
 
@@ -223,12 +229,18 @@ Authorization: Bearer YOUR_INGESTION_API_KEY
 | `status` | 含义 | 建议 |
 | --- | --- | --- |
 | `queued` | 接收记录已建立，后台尚未写入终态；处理过程中仍可能保持此值 | 低频轮询 |
-| `imported` | 至少新增了一条资源来源 | 接收处理结束，未必完成 TMDB 匹配 |
+| `imported` | 至少新增了一条资源来源 | 来源已写入；随后会自动执行 TMDB 匹配 |
 | `duplicate` | 没有新增来源，通常为已有资源 | 接收处理结束 |
 | `ignored` | 未提取到支持的链接 | 保留原文，核查格式/网盘支持情况 |
 | `failed` | 后台处理出现异常 | 记录接收 ID，由管理端排查 |
 
 当前不存在 `extracting`、`matching`、`matched` 等接收事件状态。
+
+### 自动 TMDB 匹配
+
+来源写入后，后台会为本次消息涉及的媒体记录调用 TMDB 搜索。满足高置信度、标题和年份一致且没有资源冲突的候选会自动关联；候选存在歧义时会保存为 `review`，没有结果时为 `not_found`，临时请求失败时为 `error`。这些状态属于媒体记录，不会改变接收事件的 `imported` / `duplicate` 状态。未自动关联的条目可在媒体详情中重新搜索候选并手动确认。
+
+结果中的 `links[].status` 是单条来源状态：`inserted` 表示本次事件新增，`duplicate` 表示来源已存在，`error` 表示该条来源导入异常。事件为 `imported` 时至少有一条来源为 `inserted`；事件为 `failed` 时没有来源成功新增且至少有一条来源处理异常。
 
 ## 6. 错误响应
 
@@ -343,7 +355,7 @@ else:
 - 维护自己的待发送队列，只有收到合法的 202 JSON 和 `id` 后才记为已送达。
 - 超时、连接断开或临时 5xx 时，使用**同一 event_id**指数退避重试，例如 2/5/15/30 秒，设定最大次数。
 - 400/422 修正请求后再发；401/503 修复密钥或配置，不要快速循环重试。
-- 避免并发推送同一事件：当前消息去重采用“先查后插”，并发时可能遇到唯一约束冲突而返回 500；串行重试可查询到原记录。
+- 同一个 event_id 可以安全并发重试：服务端使用唯一约束原子去重，只有首次写入会启动后台处理，其余请求返回同一个接收 ID。
 - 收到 202 后低频查询结果（例如每 3～5 秒），不要用反复 POST 代替结果查询。
 - 同一个 event_id 即便已经 failed，也不会重新执行。失败重放目前没有专用接口；排查原因后可用带版本的新 ID，但这不提供跨整个处理流程的 exactly-once 保证。
 
@@ -352,7 +364,7 @@ else:
 1. **没有自动 TMDB 刮削**：接收后台调用现有导入逻辑，将来源写入缓存。TMDB 关联仍由现有管理操作/批量匹配触发。
 2. **消息全文解析仍有限**：当前复用逐行导入器。115 每行只提取第一个分享链接，并主要使用同一行的前缀作为标题；片名在上一行、链接在下一行的消息可以收件，但不能保证正确关联片名。独立行访问码尚不会自动拼入分享 URL。ED2K 支持一行多个链接。无需发送方替 PanBox 识别作品，但必须接受当前版本的解析限制。
 3. **不是持久任务队列**：原文已落库，但处理使用每消息一个 daemon 线程；没有并发上限、自动恢复或持久重试。进程重启可能留下 queued 记录。建议发送方保留原文和接收 ID，低并发接入；大规模推送前需要补齐 worker 调度和恢复机制。
-4. **链接结果状态的已知限制**：当前 ingestion_links 的 inserted/duplicate 判断基于导入后来源是否存在，已有来源也可能被标为 inserted。不要据此统计新增链接；以事件状态为粗粒度结果，精确统计需后续修复。
+4. **链接状态按来源导入结果记录**：`ingestion_links.status` 会区分本次新插入的 `inserted`、已存在的 `duplicate` 和单条导入异常的 `error`；事件级 `imported` 仍表示至少有一条来源成功新增。
 5. **暂不支持其他网盘或磁力解析**：目前为 115.com、115cdn.com、ED2K。ED2K 在本项目中 provider 为 115。收到其他消息通常为 ignored。
 6. **原文不等于永久有效资源**：收件、导入成功都不验证分享存活性，不进行转存、离线下载或 TG 抓取。
 7. **当前共用一个接入 Key**：持有该 Key 的客户端可查询其已知 ID 对应的任何接收记录，没有按调用方隔离；只分发给可信项目。

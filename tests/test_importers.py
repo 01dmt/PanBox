@@ -8,6 +8,7 @@ from pathlib import Path
 from backend.importers import (
     extract_tmdb_ids,
     iter_ed2k_sources,
+    iter_share_sources,
     parse_ed2k_link,
     parse_release_aliases,
     parse_release_title,
@@ -86,6 +87,25 @@ class ImporterTests(unittest.TestCase):
         )
         self.assertEqual((first.title, first.year, first.source_type), ("好东西", 2024, "115"))
         self.assertEqual((second.title, second.year), ("那山那人那狗", 1999))
+
+    def test_parses_channel_heading_for_115_share_metadata(self) -> None:
+        content = (
+            "📺 余红旧事 (2026) S01E16 ✨4K WEB-DL DDP 5 1\n\n"
+            "🌟 评分： 5.5\n"
+            "🔗 链接： 点击跳转 https://115cdn.com/s/swstch33zrk?password=t58d\n"
+        )
+        source = next(iter_share_sources(content))
+        self.assertEqual(
+            (source.title, source.year, source.media_type, source.season, source.episode),
+            ("余红旧事", 2026, "tv", 1, 16),
+        )
+        self.assertEqual((source.quality, source.audio), ("4K", "DDP5.1"))
+        self.assertEqual(source.metadata["media_info"], "4K WEB-DL DDP 5 1")
+        self.assertEqual(source.raw_label, "余红旧事")
+
+    def test_115_share_domain_is_used_in_source_key(self) -> None:
+        source = parse_share_line("标题 (2024) https://115.com/s/example?password=abcd")
+        self.assertEqual(source.source_key, "115:https://115.com/s/example?password=abcd")
 
     def test_preserves_bracketed_title(self) -> None:
         source = parse_share_line(
@@ -171,6 +191,23 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(stats["media"]["total"], 1)
         self.assertEqual(stats["sources"]["total"], 2)
         self.assertEqual(page["items"][0]["episode_count"], 2)
+
+    def test_reimport_refreshes_old_unknown_share_placeholder(self) -> None:
+        old = "🔗 链接： 点击跳转 https://115cdn.com/s/refresh?password=abcd"
+        corrected = (
+            "📺 余红旧事 (2026) S01E16 ✨4K WEB-DL DDP 5 1\n"
+            "🔗 链接： 点击跳转 https://115cdn.com/s/refresh?password=abcd"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "media.db"
+            import_content(old, "old.txt", db_path=db_path)
+            result = import_content(corrected, "corrected.txt", db_path=db_path)
+            page = list_media(db_path=db_path)
+            source = get_media(page["items"][0]["id"], db_path)["sources"][0]
+
+        self.assertEqual(result["duplicates"], 1)
+        self.assertEqual((page["items"][0]["title"], page["items"][0]["year"]), ("余红旧事", 2026))
+        self.assertEqual((source["season"], source["episode"], source["quality"], source["audio"]), (1, 16, "4K", "DDP5.1"))
 
     def test_tmdb_link_corrects_inferred_media_type(self) -> None:
         content = (

@@ -171,6 +171,34 @@ select:focus-visible {
   border-top: 1px solid var(--line);
 }
 
+.sidebar-tmdb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  color: var(--muted);
+  font-size: 11px;
+  border-top: 1px solid var(--line);
+}
+
+.sidebar-tmdb i,
+.mobile-tmdb-state i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  background: var(--subtle);
+  border-radius: 50%;
+}
+
+.sidebar-tmdb.connected,
+.mobile-tmdb-state.connected { color: var(--green); }
+.sidebar-tmdb.connected i,
+.mobile-tmdb-state.connected i { background: var(--green); }
+.sidebar-tmdb.offline,
+.mobile-tmdb-state.offline { color: var(--coral); }
+.sidebar-tmdb.offline i,
+.mobile-tmdb-state.offline i { background: var(--coral); }
+
 .sidebar-summary .summary-label {
   font-size: 11px;
   font-weight: 700;
@@ -242,7 +270,7 @@ select:focus-visible {
 .topbar {
   display: grid;
   flex: 0 0 auto;
-  grid-template-columns: minmax(260px, 1fr) auto auto;
+  grid-template-columns: minmax(260px, 1fr) auto;
   align-items: center;
   gap: 14px;
   min-height: 68px;
@@ -341,43 +369,6 @@ select:focus-visible {
 
 .audit-banner {
   flex: 0 0 auto;
-}
-
-.tmdb-state {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 150px;
-  height: 44px;
-  padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-}
-
-.tmdb-state.connected {
-  color: var(--green);
-  background: var(--green-soft);
-  border-color: #cce9db;
-}
-
-.tmdb-state.offline {
-  color: var(--coral);
-  background: var(--coral-soft);
-  border-color: #f4d2ce;
-}
-
-.tmdb-state div {
-  display: grid;
-  gap: 1px;
-}
-
-.tmdb-state strong {
-  font-size: 12px;
-}
-
-.tmdb-state span {
-  font-size: 10px;
-  color: var(--muted);
 }
 
 .icon-command {
@@ -1371,10 +1362,7 @@ select:focus-visible {
 }
 
 .import-view {
-  display: grid;
-  grid-template-columns: minmax(320px, 0.85fr) minmax(480px, 1.5fr);
-  gap: 22px;
-  align-items: start;
+  display: block;
 }
 
 .import-zone-wrap,
@@ -1440,6 +1428,141 @@ select:focus-visible {
   overflow: hidden;
 }
 
+.manual-import-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(23, 33, 38, 0.28);
+}
+
+.manual-import-modal {
+  width: min(560px, 100%);
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+}
+
+.manual-import-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.manual-import-head div {
+  display: grid;
+  gap: 4px;
+}
+
+.manual-import-head span {
+  color: var(--teal);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.manual-import-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.manual-import-modal .import-zone {
+  min-height: 250px;
+  padding: 22px;
+}
+
+.manual-import-modal .import-result {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  color: var(--green);
+  background: var(--green-soft);
+  border-radius: 6px;
+}
+
+.manual-import-modal .import-result > div {
+  display: grid;
+  gap: 3px;
+}
+
+.manual-import-modal .import-result strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.manual-import-modal .import-result span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.ingestion-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.ingestion-summary > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 3px 10px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+
+.ingestion-summary span,
+.ingestion-summary small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.ingestion-summary strong {
+  grid-row: span 2;
+  align-self: center;
+  color: var(--teal);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.ingestion-head,
+.ingestion-head + .history-row,
+.ingestion-head ~ .history-row {
+  grid-template-columns: minmax(130px, 1.1fr) minmax(80px, .7fr) minmax(180px, 1.8fr) 64px 116px;
+}
+
+.ingestion-head + .history-row > span:nth-child(2),
+.history-row > span:nth-child(2) {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.ingestion-media {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ingestion-status {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.ingestion-status--imported { color: var(--teal); }
+.ingestion-status--duplicate { color: #a06a16; }
+.ingestion-status--failed { color: #a33c34; }
+
 .import-history .page-section-title {
   min-height: 52px;
   padding: 0 14px;
@@ -1478,6 +1601,14 @@ select:focus-visible {
   min-width: 0;
   gap: 7px;
   color: var(--teal);
+}
+
+.ingestion-channel img {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  object-fit: cover;
+  border-radius: 50%;
 }
 
 .history-row strong {
@@ -1784,7 +1915,7 @@ select:focus-visible {
     position: sticky;
     top: 0;
     z-index: 10;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: 1fr auto;
     gap: 8px;
     min-height: 58px;
     padding: 8px 12px;
@@ -1805,18 +1936,6 @@ select:focus-visible {
     grid-row: 2;
     width: 100%;
     background: var(--surface);
-  }
-
-  .tmdb-state {
-    min-width: 40px;
-    width: 40px;
-    height: 40px;
-    justify-content: center;
-    padding: 0;
-  }
-
-  .tmdb-state div {
-    display: none;
   }
 
   .icon-command {
@@ -2063,6 +2182,22 @@ select:focus-visible {
     min-width: 670px;
   }
 
+  .mobile-tmdb-state {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 9px;
+    color: var(--muted);
+    font-size: 10px;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    box-shadow: 0 3px 12px rgba(26, 44, 51, 0.08);
+  }
+
   .mobile-nav {
     position: fixed;
     right: 0;
@@ -2125,10 +2260,9 @@ select:focus-visible {
   .sidebar-nav button { min-height: 46px; padding-inline: 14px; font-size: 15px; }
   .sidebar-summary { padding: 20px 24px; }
   .sidebar-footer { padding: 16px 24px; }
-  .topbar { min-height: 80px; padding: 12px 22px; grid-template-columns: minmax(240px, 1fr) auto auto; gap: 16px; }
+  .topbar { min-height: 80px; padding: 12px 22px; grid-template-columns: minmax(240px, 1fr) auto; gap: 16px; }
   .global-search { width: min(760px, 100%); height: 52px; border-radius: 8px; }
   .global-search button { height: 44px; }
-  .tmdb-state { height: 52px; min-width: 180px; padding-inline: 15px; border-radius: 8px; }
   .icon-command { height: 48px; padding-inline: 18px; border-radius: 8px; }
   .message-banner { min-height: 42px; padding-inline: 22px; }
   .stats-bar { gap: 14px; padding: 16px 22px; }

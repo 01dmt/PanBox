@@ -64,6 +64,7 @@ export default function App() {
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [manualImportOpen, setManualImportOpen] = useState(false);
   const searchRef = useRef(null);
   const mediaRequestRef = useRef(0);
   const mediaAbortRef = useRef(null);
@@ -170,6 +171,7 @@ export default function App() {
 
   const changeView = useCallback((nextView) => {
     setView(nextView);
+    setManualImportOpen(false);
     if (DATA_VIEWS.has(nextView) && nextView !== lastDataViewRef.current) {
       lastDataViewRef.current = nextView;
       setFilters((current) => ({ ...DEFAULT_FILTERS, availability: nextView === "library" ? "available" : "all", pageSize: current.pageSize }));
@@ -322,7 +324,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar view={view} onChange={changeView} stats={stats} />
+      <Sidebar view={view} onChange={changeView} stats={stats} config={config} />
       <div className="app-main">
         {view !== "library" && <Topbar
           view={view}
@@ -337,9 +339,9 @@ export default function App() {
             setMobileInspectorOpen(false);
           }}
           searchRef={searchRef}
-          config={config}
           syncing={syncing}
           onSync={handleSync}
+          onManualImport={() => setManualImportOpen(true)}
         />}
 
         {view !== "dashboard" && view !== "library" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
@@ -417,6 +419,8 @@ export default function App() {
 
         {view === "imports" ? (
           <ImportView
+            manualOpen={manualImportOpen}
+            onCloseManual={() => setManualImportOpen(false)}
             onImported={async (result) => {
               setNotice(`导入完成：新增 ${result.inserted} 条，跳过重复 ${result.duplicates} 条。`);
               await loadSummary();
@@ -426,7 +430,7 @@ export default function App() {
 
         {view === "settings" ? <SettingsView config={config} stats={stats} /> : null}
       </div>
-      <MobileNav view={view} onChange={changeView} pending={stats?.media?.pending ?? 0} />
+      <MobileNav view={view} onChange={changeView} pending={stats?.media?.pending ?? 0} config={config} />
     </div>
   );
 }

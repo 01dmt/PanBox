@@ -64,7 +64,10 @@ CREATE TABLE IF NOT EXISTS ingestion_events (
     service TEXT NOT NULL DEFAULT 'unknown',
     channel_id TEXT,
     channel_name TEXT,
+    channel_username TEXT,
     message_id TEXT,
+    message_url TEXT,
+    channel_avatar_url TEXT,
     published_at TEXT,
     raw_text TEXT NOT NULL,
     raw_json TEXT,
@@ -174,6 +177,14 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
         if "provider" not in columns:
             connection.execute("ALTER TABLE source_records ADD COLUMN provider TEXT NOT NULL DEFAULT '115'")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_provider ON source_records(provider)")
+        ingestion_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ingestion_events)")}
+        for name, definition in (
+            ("channel_username", "TEXT"),
+            ("message_url", "TEXT"),
+            ("channel_avatar_url", "TEXT"),
+        ):
+            if name not in ingestion_columns:
+                connection.execute(f"ALTER TABLE ingestion_events ADD COLUMN {name} {definition}")
         table_sql = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='source_records'").fetchone()[0] or ""
         if "source_type IN ('115', 'ed2k')" in table_sql:
             connection.execute("PRAGMA foreign_keys = OFF")

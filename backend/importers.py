@@ -12,7 +12,7 @@ import wordninja
 from .recognition import parse as parse_recognition
 
 
-SHARE_URL_RE = re.compile(r"https://115(?:cdn)?\.com/s/[^\s\t]+", re.IGNORECASE)
+SHARE_URL_RE = re.compile(r"https?://(?:www\.)?115(?:cdn)?\.com/s/[^\s\t<>]+", re.IGNORECASE)
 ED2K_RE = re.compile(
     r"ed2k://\|file\|[^|]+\|\d+\|[A-Fa-f0-9]{32}\|/",
     re.IGNORECASE,
@@ -35,6 +35,19 @@ CODEC_RE = re.compile(r"(?i)(H[._-]?26[45]|x26[45]|HEVC|AV1|AVC)")
 AUDIO_RE = re.compile(
     r"(?i)(DDP?\d(?:\.\d)?(?:\.Atmos)?|AAC\d(?:\.\d)?|AAC|DTS(?:-HD)?(?:\.MA)?\d?(?:\.\d)?|TrueHD(?:\.Atmos)?|FLAC\d?(?:\.\d)?)"
 )
+SHARE_AUDIO_RE = re.compile(
+    r"(?i)\b(DDP?|AAC|DTS(?:[-_. ]HD)?(?:[-_. ]MA)?|TrueHD|FLAC)"
+    r"(?:\s*([0-9]+)(?:[.\s]+([0-9]+))?)?(?:[.\s]*(Atmos))?\b"
+)
+SHARE_EPISODE_RE = re.compile(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b")
+SHARE_SEASON_RE = re.compile(r"(?i)\bS(\d{1,2})\b")
+SHARE_HEADER_YEAR_RE = re.compile(r"[\(\[（【]\s*((?:19|20)\d{2})\s*[\)\]）】]")
+SHARE_TECHNICAL_RE = re.compile(
+    r"(?i)(?<!\w)(?:2160p|1080p|1080i|720p|576p|480p|4k|"
+    r"web[._ -]?dl|webrip|bluray|bdrip|hdtv|remux|dvdrip|"
+    r"ddp?|aac|dts|truehd|flac|h[._-]?26[45]|x26[45]|hevc|av1|avc|hdr|dv)(?!\w)"
+)
+SHARE_METADATA_PREFIXES = ("🌟", "📽", "🌍", "🗣", "👥", "📖", "💾", "🙋")
 TECHNICAL_STOP_RE = re.compile(
     r"(?i)(?:^|[._\-\s])(2160p|1080p|1080i|720p|576p|480p|4K|WEB[._-]?DL|WEBRip|BluRay|BDRip|HDTV|REMUX|DVDRip|NF|AMZN|DSNP|HMAX|VIU|AI修复(?:版)?|修复版)(?=$|[._\-\s])"
 )
@@ -148,7 +161,86 @@ def infer_share_media_type(title: str, extra: str) -> str:
     return "unknown"
 
 
-def parse_share_line(line: str) -> Optional[ParsedSource]:
+def _is_generic_share_label(value: str) -> bool:
+    compact = re.sub(r"[\s:：|→>\-]+", "", value.strip())
+    compact = compact.replace("🔗", "")
+    return not compact or compact in {"链接", "点击跳转", "链接点击跳转"}
+
+
+def _share_heading_details(value: str) -> dict[str, object]:
+    """Parse a channel-style heading such as ``📺 Title (2026) S01E02 ✨4K``."""
+    heading = value.lstrip("\ufeff \t")
+    heading = re.sub(r"^\s*[📺🎬🍿🎞️]+\s*", "", heading)
+    year_match = SHARE_HEADER_YEAR_RE.search(heading) or YEAR_RE.search(heading)
+    episode_match = SHARE_EPISODE_RE.search(heading)
+    season_match = episode_match or SHARE_SEASON_RE.search(heading)
+    quality_match = QUALITY_RE.search(heading)
+    technical_match = SHARE_TECHNICAL_RE.search(heading)
+
+    cut_points = [match.start() for match in (year_match, episode_match, quality_match, technical_match) if match]
+    title = heading[: min(cut_points)] if cut_points else heading
+    title = title.strip(" \t-–—|·()（）[]【】✨") or "未命名"
+    year = int(year_match.group(1)) if year_match else None
+    season = int(season_match.group(1)) if season_match else None
+    episode = int(episode_match.group(2)) if episode_match else None
+
+    audio_match = SHARE_AUDIO_RE.search(heading)
+    audio = None
+    if audio_match:
+        audio = audio_match.group(1).upper()
+        if audio == "TRUEHD":
+            audio = "TrueHD"
+        if audio_match.group(2):
+            audio += audio_match.group(2)
+            if audio_match.group(3):
+                audio += f".{audio_match.group(3)}"
+        if audio_match.group(4):
+            audio += ".Atmos"
+
+    codec_match = CODEC_RE.search(heading)
+    hdr_tags = []
+    for pattern, label in (
+        (r"(?i)(?<!\w)DV(?!\w)", "DV"),
+        (r"(?i)HDR10P|HDR10\+", "HDR10+"),
+        (r"(?i)(?<!\w)HDR10(?!\w)", "HDR10"),
+        (r"(?i)(?<!\w)HDR(?!\w)", "HDR"),
+        (r"(?i)(?<!\w)SDR(?!\w)", "SDR"),
+    ):
+        if re.search(pattern, heading) and label not in hdr_tags:
+            hdr_tags.append(label)
+
+    media_type = "tv" if season is not None or episode is not None else infer_share_media_type(title, heading)
+    media_info = heading[technical_match.start() :].strip(" \t✨") if technical_match else None
+    return {
+        "title": title,
+        "year": year,
+        "season": season,
+        "episode": episode,
+        "media_type": media_type,
+        "quality": quality_match.group(1).upper() if quality_match else None,
+        "codec": codec_match.group(1).upper().replace("_", ".") if codec_match else None,
+        "hdr": " + ".join(hdr_tags) if hdr_tags else None,
+        "audio": audio,
+        "media_info": media_info,
+    }
+
+
+def _find_share_heading(lines: list[str], index: int) -> str | None:
+    """Find the title line preceding a generic link label in one forwarded message."""
+    for previous in reversed(lines[:index]):
+        candidate = previous.strip()
+        if not candidate or candidate.startswith(SHARE_METADATA_PREFIXES):
+            continue
+        if "📺" in candidate:
+            return candidate
+    for previous in lines[:index]:
+        candidate = previous.strip()
+        if candidate and not candidate.startswith(SHARE_METADATA_PREFIXES) and not SHARE_URL_RE.search(candidate):
+            return candidate
+    return None
+
+
+def parse_share_line(line: str, *, context: str | None = None) -> Optional[ParsedSource]:
     raw = line.rstrip("\r\n")
     match = SHARE_URL_RE.search(raw)
     if not match:
@@ -158,26 +250,64 @@ def parse_share_line(line: str) -> Optional[ParsedSource]:
     prefix = raw[: match.start()].strip("\ufeff \t")
     suffix = raw[match.end() :].strip(" \t")
     label = prefix.split("\t", 1)[0].strip() if prefix else suffix
-    title, year = parse_title_year(label)
-    media_type = infer_share_media_type(title, suffix)
+    heading = context if context and _is_generic_share_label(label) else None
+    details = _share_heading_details(heading or label)
+    if heading is None:
+        # Preserve the established one-line format while extracting episode and
+        # technical metadata when it is present beside the URL.
+        title, year = parse_title_year(label)
+        episode_match = SHARE_EPISODE_RE.search(label)
+        season_match = episode_match or SHARE_SEASON_RE.search(label)
+        details.update({
+            "title": title,
+            "year": year,
+            "season": int(season_match.group(1)) if season_match else None,
+            "episode": int(episode_match.group(2)) if episode_match else None,
+            "media_type": infer_share_media_type(title, f"{label} {suffix}"),
+        })
+    details["media_type"] = "tv" if details.get("season") is not None or details.get("episode") is not None else details["media_type"]
 
     return ParsedSource(
         source_type="115",
         provider="115",
         source_key=f"115:{url}",
-        title=title,
-        year=year,
-        media_type=media_type,
-        raw_label=label or title,
+        title=str(details["title"]),
+        year=details["year"],
+        media_type=str(details["media_type"]),
+        # Keep the searchable label clean; retain the complete channel heading
+        # in metadata so media details remain available without polluting title
+        # matching with the episode and quality suffix.
+        raw_label=str(details["title"]),
         raw_text=raw,
         url=url,
-        metadata={"extra": suffix} if suffix else {},
+        season=details["season"],
+        episode=details["episode"],
+        quality=details["quality"],
+        codec=details["codec"],
+        hdr=details["hdr"],
+        audio=details["audio"],
+        metadata={
+            key: value
+            for key, value in {
+                "context": heading,
+                "media_info": details.get("media_info"),
+                "extra": suffix,
+            }.items()
+            if value
+        },
     )
 
 
 def iter_share_sources(content: str) -> Iterator[ParsedSource]:
-    for line in content.splitlines():
-        parsed = parse_share_line(line)
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        match = SHARE_URL_RE.search(line)
+        if not match:
+            continue
+        prefix = line[: match.start()].strip("\ufeff \t")
+        label = prefix.split("\t", 1)[0].strip() if prefix else ""
+        context = _find_share_heading(lines, index) if _is_generic_share_label(label) else None
+        parsed = parse_share_line(line, context=context)
         if parsed:
             yield parsed
 

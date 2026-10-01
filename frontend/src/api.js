@@ -8,7 +8,7 @@ async function request(path, options = {}) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.error || `请求失败 (${response.status})`);
+    throw new Error(payload.error || payload.detail || `请求失败 (${response.status})`);
   }
   return payload;
 }
@@ -39,6 +39,10 @@ export function pauseShareAudit() {
 
 export function getImports() {
   return request("/api/imports?limit=100");
+}
+
+export function getIngestionRecords() {
+  return request("/api/ingestion/records?limit=100");
 }
 
 export function getMediaFilters() {

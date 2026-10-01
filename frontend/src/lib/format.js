@@ -21,6 +21,18 @@ export function formatDate(value) {
   }).format(date);
 }
 
+export function formatDateTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 export function posterUrl(path, size = "w342") {
   return path ? `https://image.tmdb.org/t/p/${size}${path}` : "/fallback-poster.png";
 }

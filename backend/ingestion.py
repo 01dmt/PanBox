@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import secrets
+import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -10,10 +10,49 @@ from typing import Any
 from .importers import detect_source_kind, iter_sources
 from .repository import import_content
 from .schema import connect, init_db
+from .tmdb import TmdbClient, TmdbError, search_media
+from .telegram_avatar import fetch_public_channel_avatar, normalize_channel_username
 
 
 class IngestionError(ValueError):
     pass
+
+
+_INIT_LOCK = threading.Lock()
+
+
+def _auto_match_media(media_ids: set[int], db_path=None) -> dict[int, str]:
+    """Run the normal TMDB matcher for media created by an incoming message.
+
+    Matching is deliberately best-effort: ingestion has already succeeded if
+    the source was stored, and a temporary TMDB/network error must not turn a
+    valid webhook into a failed delivery. ``search_media`` still enforces the
+    confidence and ambiguity rules, so only high-confidence candidates are
+    linked automatically; everything else remains in review/pending state.
+    """
+    if not media_ids:
+        return {}
+    client = TmdbClient()
+    if not client.configured:
+        return {}
+    results: dict[int, str] = {}
+    for media_id in sorted(media_ids):
+        try:
+            result = search_media(
+                media_id,
+                auto_link=True,
+                refresh_share=True,
+                db_path=db_path,
+                client=client,
+            )
+            results[media_id] = str(result.get("status") or "unknown")
+        except TmdbError:
+            results[media_id] = "error"
+        except Exception:
+            # Keep delivery processing resilient to an unexpected matcher
+            # failure. The media item remains available for manual retry.
+            results[media_id] = "error"
+    return results
 
 
 def _now() -> str:
@@ -40,7 +79,26 @@ def _text(body: dict[str, Any]) -> str:
 
 def _source_info(body: dict[str, Any]) -> dict[str, str | None]:
     source = body.get("source") if isinstance(body.get("source"), dict) else {}
-    return {key: str(source[key]) if source.get(key) is not None else None for key in ("service", "channel_id", "channel_name", "message_id", "published_at")}
+    return {key: str(source[key]) if source.get(key) is not None else None for key in (
+        "service", "channel_id", "channel_name", "channel_username", "message_id", "message_url", "published_at",
+    )}
+
+
+def _refresh_channel_avatar(ingestion_id: str, source: dict[str, str | None], db_path=None) -> None:
+    username = normalize_channel_username(source.get("channel_username"))
+    if not username:
+        return
+    with connect(db_path) as db:
+        cached = db.execute(
+            """SELECT channel_avatar_url FROM ingestion_events
+               WHERE channel_username = ? AND channel_avatar_url IS NOT NULL AND channel_avatar_url != ''
+               ORDER BY received_at DESC LIMIT 1""",
+            (username,),
+        ).fetchone()
+    avatar_url = cached["channel_avatar_url"] if cached else fetch_public_channel_avatar(username)
+    if avatar_url:
+        with connect(db_path) as db:
+            db.execute("UPDATE ingestion_events SET channel_avatar_url = ? WHERE id = ?", (avatar_url, ingestion_id))
 
 
 def receive(body: dict[str, Any], db_path=None) -> dict[str, Any]:
@@ -54,18 +112,25 @@ def receive(body: dict[str, Any], db_path=None) -> dict[str, Any]:
         raise IngestionError("原始消息不能超过 512 KB。")
     source = _source_info(body)
     service = source["service"] or "unknown"
-    init_db(db_path)
+    # The API initializes the schema at startup, but receive() is also used
+    # directly by importers and tests. Serialize the idempotent setup because
+    # SQLite cannot change journal mode while another initializer is writing.
+    with _INIT_LOCK:
+        init_db(db_path)
+    ingestion_id = _event_id()
     with connect(db_path) as db:
-        existing = db.execute("SELECT id,status FROM ingestion_events WHERE service=? AND event_id=?", (service, event_id)).fetchone()
-        if existing:
-            return {"id": existing["id"], "event_id": event_id, "status": existing["status"], "duplicate": True}
-        ingestion_id = _event_id()
-        db.execute(
+        cursor = db.execute(
             """INSERT INTO ingestion_events
-            (id,event_id,service,channel_id,channel_name,message_id,published_at,raw_text,raw_json,status,received_at)
-            VALUES(?,?,?,?,?,?,?,?,?,'queued',?)""",
-            (ingestion_id, event_id, service, source["channel_id"], source["channel_name"], source["message_id"], source["published_at"], text, json.dumps(body, ensure_ascii=False), _now()),
+            (id,event_id,service,channel_id,channel_name,channel_username,message_id,message_url,published_at,raw_text,raw_json,status,received_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?)
+            ON CONFLICT(service, event_id) DO NOTHING""",
+            (ingestion_id, event_id, service, source["channel_id"], source["channel_name"], source["channel_username"], source["message_id"], source["message_url"], source["published_at"], text, json.dumps(body, ensure_ascii=False), _now()),
         )
+        if cursor.rowcount == 0:
+            existing = db.execute("SELECT id,status FROM ingestion_events WHERE service=? AND event_id=?", (service, event_id)).fetchone()
+            if existing:
+                return {"id": existing["id"], "event_id": event_id, "status": existing["status"], "duplicate": True}
+            raise sqlite3.IntegrityError("ingestion event was ignored but could not be read")
     thread = threading.Thread(target=process, args=(ingestion_id, text, db_path), daemon=True)
     thread.start()
     return {"id": ingestion_id, "event_id": event_id, "status": "queued", "duplicate": False}
@@ -73,6 +138,12 @@ def receive(body: dict[str, Any], db_path=None) -> dict[str, Any]:
 
 def process(ingestion_id: str, text: str, db_path=None) -> None:
     try:
+        with connect(db_path) as db:
+            event_source_row = db.execute(
+                "SELECT service, channel_id, channel_name, channel_username, message_id, message_url, published_at FROM ingestion_events WHERE id = ?",
+                (ingestion_id,),
+            ).fetchone()
+        event_source = dict(event_source_row) if event_source_row else {}
         kind = detect_source_kind(text)
         sources = list(iter_sources(text, kind))
         if not sources:
@@ -80,11 +151,21 @@ def process(ingestion_id: str, text: str, db_path=None) -> None:
                 db.execute("UPDATE ingestion_events SET status='ignored', error=?, processed_at=? WHERE id=?", ("未提取到支持的 115 或 ED2K 资源。", _now(), ingestion_id))
             return
         result = import_content(text, f"webhook:{ingestion_id}.txt", kind=kind, db_path=db_path)
+        inserted_keys = set(result.get("inserted_source_keys") or ())
+        duplicate_keys = set(result.get("duplicate_source_keys") or ())
+        error_keys = set(result.get("error_source_keys") or ())
         media_ids: set[int] = set()
         with connect(db_path) as db:
             for source in sources:
                 row = db.execute("SELECT id,media_id FROM source_records WHERE source_key=?", (source.source_key,)).fetchone()
-                status = "inserted" if row else "duplicate"
+                if source.source_key in inserted_keys:
+                    status = "inserted"
+                elif source.source_key in error_keys:
+                    status = "error"
+                elif source.source_key in duplicate_keys:
+                    status = "duplicate"
+                else:
+                    status = "error"
                 media_id = int(row["media_id"]) if row else None
                 if media_id:
                     media_ids.add(media_id)
@@ -92,8 +173,13 @@ def process(ingestion_id: str, text: str, db_path=None) -> None:
                     "INSERT OR IGNORE INTO ingestion_links(ingestion_id,source_key,provider,source_type,url,status,media_id) VALUES(?,?,?,?,?,?,?)",
                     (ingestion_id, source.source_key, source.provider, source.source_type, source.url, status, media_id),
                 )
-            status = "imported" if result["inserted"] else "duplicate"
+            status = "imported" if result["inserted"] else ("failed" if result["errors"] else "duplicate")
             db.execute("UPDATE ingestion_events SET status=?, media_ids_json=?, processed_at=? WHERE id=?", (status, json.dumps(sorted(media_ids)), _now(), ingestion_id))
+        # Do this after the import transaction is committed. A webhook should
+        # acknowledge and retain its resources even if TMDB is unavailable;
+        # successful matches are linked automatically by search_media.
+        _refresh_channel_avatar(ingestion_id, event_source, db_path)
+        _auto_match_media(media_ids, db_path)
     except Exception as exc:
         with connect(db_path) as db:
             db.execute("UPDATE ingestion_events SET status='failed', error=?, processed_at=? WHERE id=?", (str(exc)[:500], _now(), ingestion_id))

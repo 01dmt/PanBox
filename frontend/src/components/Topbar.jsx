@@ -1,4 +1,4 @@
-import { CheckCircle2, CloudOff, RefreshCw, Search, X } from "lucide-react";
+import { FolderInput, RefreshCw, Search, X } from "lucide-react";
 
 
 const TITLES = {
@@ -6,7 +6,7 @@ const TITLES = {
   library: "资料库",
   pending: "待匹配",
   duplicates: "多来源作品",
-  imports: "导入记录",
+  imports: "入库记录",
   settings: "设置",
 };
 
@@ -17,9 +17,9 @@ export default function Topbar({
   onSearch,
   onSubmitSearch,
   searchRef,
-  config,
   syncing,
   onSync,
+  onManualImport,
 }) {
   const dataView = ["library", "pending", "duplicates"].includes(view);
   return (
@@ -48,15 +48,12 @@ export default function Topbar({
         <h1>{TITLES[view]}</h1>
       )}
 
-      {view !== "library" ? <div className={`tmdb-state ${config?.tmdb_configured ? "connected" : "offline"}`}>
-        {config?.tmdb_configured ? <CheckCircle2 size={17} /> : <CloudOff size={17} />}
-        <div>
-          <strong>{config?.tmdb_configured ? "TMDB 已连接" : "TMDB 未配置"}</strong>
-          <span>{config?.tmdb_auth_mode === "bearer" ? "Bearer Token" : config?.tmdb_auth_mode === "api_key" ? "API Key" : "仅本地管理"}</span>
-        </div>
-      </div> : null}
-
-      {dataView && view !== "library" ? (
+      {view === "imports" ? (
+        <button type="button" className="icon-command" onClick={onManualImport} title="手动入库">
+          <FolderInput size={17} />
+          <span>手动入库</span>
+        </button>
+      ) : dataView && view !== "library" ? (
         <button
           type="button"
           className="icon-command"

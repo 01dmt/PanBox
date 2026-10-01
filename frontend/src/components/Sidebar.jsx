@@ -17,12 +17,12 @@ const NAV_ITEMS = [
   { id: "library", label: "资料库", icon: Library },
   { id: "pending", label: "待匹配", icon: CircleHelp, countKey: "pending" },
   { id: "duplicates", label: "多来源", icon: Layers3, countKey: "multi" },
-  { id: "imports", label: "导入记录", icon: FileClock },
+  { id: "imports", label: "入库记录", icon: FileClock },
   { id: "settings", label: "设置", icon: Settings },
 ];
 
 
-export default function Sidebar({ view, onChange, stats }) {
+export default function Sidebar({ view, onChange, stats, config }) {
   const counts = {
     pending: stats?.media?.pending ?? 0,
     multi: stats?.multi_source ?? 0,
@@ -68,6 +68,11 @@ export default function Sidebar({ view, onChange, stats }) {
         </div>
       </div>
 
+      <div className={`sidebar-tmdb ${config?.tmdb_configured ? "connected" : "offline"}`} title={config?.tmdb_auth_mode ? `认证方式：${config.tmdb_auth_mode}` : "未配置 TMDB"}>
+        <i aria-hidden="true" />
+        <span>{config?.tmdb_configured ? "TMDB 已连接" : "TMDB 未配置"}</span>
+      </div>
+
       <div className="sidebar-footer" aria-label="辅助操作">
         <button type="button" title="刷新"><RefreshCw size={17} /></button>
         <button type="button" title="数据库"><Database size={17} /></button>
@@ -76,4 +81,3 @@ export default function Sidebar({ view, onChange, stats }) {
     </aside>
   );
 }
-

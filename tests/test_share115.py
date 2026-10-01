@@ -120,6 +120,10 @@ class Share115Tests(unittest.TestCase):
             parse_share_url("https://115cdn.com/s/example123?password=abcd#"),
             ("example123", "abcd"),
         )
+        self.assertEqual(
+            parse_share_url("https://www.115.com/s/example123?password=abcd"),
+            ("example123", "abcd"),
+        )
 
     def test_snapshot_extracts_dominant_nested_release_name(self) -> None:
         snapshot = FakeShare115Client().fetch_snapshot(

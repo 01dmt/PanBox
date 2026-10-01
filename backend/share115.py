@@ -124,7 +124,8 @@ def cleanup_cancelled_shares(
 
 def parse_share_url(url: str) -> tuple[str, str]:
     parsed = urlparse(url)
-    if parsed.hostname not in {"115.com", "115cdn.com"}:
+    hostname = (parsed.hostname or "").lower().removeprefix("www.")
+    if hostname not in {"115.com", "115cdn.com"}:
         raise Share115Error("不是受支持的 115 分享链接。")
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) < 2 or parts[-2] != "s" or not parts[-1]:
