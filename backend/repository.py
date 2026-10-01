@@ -102,9 +102,9 @@ def insert_source(
             """
             INSERT INTO source_records (
                 media_id, import_id, source_type, provider, source_key, raw_label, raw_text,
-                url, filename, file_size, ed2k_hash, season, episode, parsed_year,
+                url, filename, file_size, ed2k_hash, season, season_end, episode, parsed_year,
                 quality, codec, hdr, audio, release_group, metadata_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 media_id,
@@ -119,6 +119,7 @@ def insert_source(
                 source.file_size,
                 source.ed2k_hash,
                 source.season,
+                source.season_end,
                 source.episode,
                 source.year,
                 source.quality,
@@ -165,7 +166,7 @@ def _refresh_duplicate_source(
     connection.execute(
         """
         UPDATE source_records
-        SET media_id = ?, raw_label = ?, season = ?, episode = ?, parsed_year = ?,
+        SET media_id = ?, raw_label = ?, season = ?, season_end = ?, episode = ?, parsed_year = ?,
             quality = ?, codec = ?, hdr = ?, audio = ?, release_group = ?, metadata_json = ?
         WHERE id = ?
         """,
@@ -173,6 +174,7 @@ def _refresh_duplicate_source(
             media_id,
             source.raw_label,
             source.season,
+            source.season_end,
             source.episode,
             source.year,
             source.quality,
@@ -574,7 +576,7 @@ def list_media(
             SUM(s.source_type = '115') AS source_115_count,
             SUM(s.source_type = 'ed2k') AS source_ed2k_count,
             GROUP_CONCAT(DISTINCT s.quality) AS qualities,
-            MAX(s.season) AS max_season,
+            MAX(COALESCE(s.season_end, s.season)) AS max_season,
             COUNT(DISTINCT CASE WHEN s.episode IS NOT NULL THEN printf('%d:%d', s.season, s.episode) END) AS episode_count
         FROM media_items m
         LEFT JOIN source_records s ON s.media_id = m.id
@@ -634,7 +636,7 @@ def get_media(media_id: int, db_path: str | Path | None = None) -> dict[str, Any
                 SUM(s.source_type = '115') AS source_115_count,
                 SUM(s.source_type = 'ed2k') AS source_ed2k_count,
                 SUM(s.file_size) AS total_bytes,
-                MAX(s.season) AS max_season,
+                MAX(COALESCE(s.season_end, s.season)) AS max_season,
                 COUNT(DISTINCT CASE WHEN s.episode IS NOT NULL THEN printf('%d:%d', s.season, s.episode) END) AS episode_count
             FROM media_items m
             LEFT JOIN source_records s ON s.media_id = m.id
@@ -751,7 +753,7 @@ def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) 
                    COALESCE(m.year, s.parsed_year, CASE
                        WHEN substr(m.release_date, 1, 4) GLOB '[12][0-9][0-9][0-9]'
                        THEN CAST(substr(m.release_date, 1, 4) AS INTEGER) END) AS media_year,
-                   s.season, s.episode, s.metadata_json
+                   s.season, s.season_end, s.episode, s.metadata_json
             FROM ingestion_links l
             LEFT JOIN media_items m ON m.id = l.media_id
             LEFT JOIN source_records s ON s.source_key = l.source_key
@@ -776,7 +778,9 @@ def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) 
             source_metadata = json.loads(link["metadata_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
             source_metadata = {}
-        if not source_metadata.get("season_range"):
+        if link["season_end"] is not None:
+            source_metadata["season_range"] = [link["season"], link["season_end"]]
+        elif not source_metadata.get("season_range"):
             context = str(source_metadata.get("context") or "")
             range_match = re.search(r"(?i)\bS(\d{1,2})\s*[-~]\s*S?(\d{1,2})(?=$|\D)", context)
             if range_match and int(range_match.group(2)) > int(range_match.group(1)):

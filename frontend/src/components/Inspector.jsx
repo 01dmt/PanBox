@@ -43,6 +43,11 @@ function SourceRow({ source, readOnly = false }) {
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1400);
   };
+  const seasonStart = source.season != null ? Number(source.season) : null;
+  const seasonEnd = source.season_end != null ? Number(source.season_end) : null;
+  const seasonLabel = seasonStart != null
+    ? `S${String(seasonStart).padStart(2, "0")}${seasonEnd > seasonStart ? `-S${String(seasonEnd).padStart(2, "0")}` : ""}`
+    : "";
 
   return (
     <div className="source-row">
@@ -54,7 +59,7 @@ function SourceRow({ source, readOnly = false }) {
         <span>
           {source.source_type}
           {source.file_size ? ` · ${formatBytes(source.file_size)}` : ""}
-          {source.season != null ? ` · S${String(source.season).padStart(2, "0")}${source.episode != null ? `E${String(source.episode).padStart(2, "0")}` : " · 整季"}` : ""}
+          {source.season != null ? ` · ${seasonLabel}${source.episode != null ? `E${String(source.episode).padStart(2, "0")}` : " · 整季"}` : ""}
         </span>
         <small>{source.source_type === "115" ? maskedSource(source.url) : source.ed2k_hash}</small>
         {searchNames.length ? <small className="source-match-hint">内容：{searchNames.slice(0, 2).join(" · ")}</small> : null}
@@ -81,8 +86,10 @@ function EpisodeResourceGroup({ sources }) {
     for (const source of sources || []) {
       const numericSeason = source.season != null && !Number.isNaN(Number(source.season)) ? Number(source.season) : null;
       const season = Number.isInteger(numericSeason) ? numericSeason : null;
-      const key = season === null ? "unknown" : String(season);
-      if (!groups.has(key)) groups.set(key, { season, packs: [], episodes: [] });
+      const numericSeasonEnd = source.season_end != null && !Number.isNaN(Number(source.season_end)) ? Number(source.season_end) : null;
+      const seasonEnd = Number.isInteger(numericSeasonEnd) && numericSeasonEnd > (season ?? 0) ? numericSeasonEnd : null;
+      const key = season === null ? "unknown" : `${season}-${seasonEnd || season}`;
+      if (!groups.has(key)) groups.set(key, { season, seasonEnd, packs: [], episodes: [] });
       const group = groups.get(key);
       if (source.episode == null) group.packs.push(source);
       else group.episodes.push(source);
@@ -96,7 +103,7 @@ function EpisodeResourceGroup({ sources }) {
   return <div className="season-resources">
     <div className="season-tabs" role="tablist" aria-label="选择季度">
       {seasons.map((season, index) => <button key={String(season.season)} type="button" role="tab" aria-selected={String(index) === active} className={String(index) === active ? "active" : ""} onClick={() => setActive(String(index))}>
-        {season.season === null ? "未分类" : `第 ${season.season} 季`} <small>{season.packs.length ? `${season.packs.length} 整季` : ""}{season.packs.length && season.episodes.length ? " · " : ""}{season.episodes.length ? `${season.episodes.length} 集` : ""}</small>
+        {season.season === null ? "未分类" : `第 ${season.season}${season.seasonEnd ? `-${season.seasonEnd}` : ""} 季`} <small>{season.packs.length ? `${season.packs.length} 整季` : ""}{season.packs.length && season.episodes.length ? " · " : ""}{season.episodes.length ? `${season.episodes.length} 集` : ""}</small>
       </button>)}
     </div>
     {group?.packs.length ? <div className="season-resource-block"><h4>整季资源</h4>{group.packs.map((source) => <SourceRow source={source} key={source.id} />)}</div> : null}

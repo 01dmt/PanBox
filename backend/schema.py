@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -108,6 +110,7 @@ CREATE TABLE IF NOT EXISTS source_records (
     file_size INTEGER,
     ed2k_hash TEXT,
     season INTEGER,
+    season_end INTEGER,
     episode INTEGER,
     parsed_year INTEGER,
     quality TEXT,
@@ -176,6 +179,8 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_records)")}
         if "provider" not in columns:
             connection.execute("ALTER TABLE source_records ADD COLUMN provider TEXT NOT NULL DEFAULT '115'")
+        if "season_end" not in columns:
+            connection.execute("ALTER TABLE source_records ADD COLUMN season_end INTEGER")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_provider ON source_records(provider)")
         ingestion_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ingestion_events)")}
         for name, definition in (
@@ -203,6 +208,7 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
                     file_size INTEGER,
                     ed2k_hash TEXT,
                     season INTEGER,
+                    season_end INTEGER,
                     episode INTEGER,
                     parsed_year INTEGER,
                     quality TEXT,
@@ -214,7 +220,7 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
                     created_at TEXT NOT NULL
                 );
                 INSERT INTO source_records_v2 SELECT id, media_id, import_id, source_type, provider,
-                    source_key, raw_label, raw_text, url, filename, file_size, ed2k_hash, season,
+                    source_key, raw_label, raw_text, url, filename, file_size, ed2k_hash, season, season_end,
                     episode, parsed_year, quality, codec, hdr, audio, release_group, metadata_json, created_at
                     FROM source_records;
                 DROP TABLE source_records;
@@ -225,4 +231,17 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
                 CREATE INDEX IF NOT EXISTS idx_sources_episode ON source_records(media_id, season, episode);
             """)
             connection.execute("PRAGMA foreign_keys = ON")
+        # Older rows may only have the original S1-S3 heading in metadata.
+        # Backfill the first-class range column so the database and UI agree.
+        for row in connection.execute("SELECT id, metadata_json FROM source_records WHERE season_end IS NULL"):
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            season_range = metadata.get("season_range")
+            if not (isinstance(season_range, list) and len(season_range) == 2):
+                match = re.search(r"(?i)\bS(\d{1,2})\s*[-~]\s*S?(\d{1,2})(?=$|\D)", str(metadata.get("context") or ""))
+                season_range = [int(match.group(1)), int(match.group(2))] if match else None
+            if isinstance(season_range, list) and len(season_range) == 2 and int(season_range[1]) > int(season_range[0]):
+                connection.execute("UPDATE source_records SET season_end = ? WHERE id = ?", (int(season_range[1]), row["id"]))
     return path

@@ -132,7 +132,17 @@ class ImporterTests(unittest.TestCase):
             "🎬 毒枭：墨西哥 (2018) S1-S3全集\thttps://115cdn.com/s/example?password=o599#"
         )
         self.assertEqual((source.title, source.year, source.season, source.episode), ("毒枭：墨西哥", 2018, 1, None))
+        self.assertEqual(source.season_end, 3)
         self.assertEqual(source.metadata["season_range"], [1, 3])
+
+    def test_persists_multi_season_end_in_source_record(self) -> None:
+        content = "🎬 毒枭：墨西哥 (2018) S1-S3全集\thttps://115cdn.com/s/season-pack?password=o599#"
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "media.db"
+            import_content(content, "season-pack.txt", db_path=db_path)
+            item = get_media(list_media(db_path=db_path)["items"][0]["id"], db_path)
+
+        self.assertEqual((item["sources"][0]["season"], item["sources"][0]["season_end"]), (1, 3))
 
     def test_extracts_multiple_ed2k_links_from_one_line(self) -> None:
         content = (

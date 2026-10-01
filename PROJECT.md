@@ -86,7 +86,7 @@ PanBox 是本地优先的影视资料库，用于接收外部频道转发的资�
 ## 4. 数据模型与标识规则
 
 - `media_items`：作品主记录、年份、媒体类型、TMDB 元数据和匹配状态。
-- `source_records`：115 分享或 ED2K 文件来源；来源可多对一关联作品。115 使用规范化完整 URL，ED2K 使用哈希幂等。
+- `source_records`：115 分享或 ED2K 文件来源；来源可多对一关联作品。115 使用规范化完整 URL，ED2K 使用哈希幂等；剧集来源保存 `season`、`season_end` 和 `episode`，支持整季及跨季合集。
 - `ingestion_events`：外部消息接收记录，保存 `service`、`channel_id`、`channel_name`、`channel_username`、`message_id`、`message_url`、原文、处理状态和频道头像 URL。
 - `ingestion_links`：一条入库消息提取出的每个来源及其 `inserted`、`duplicate`、`error` 状态。
 - `imports`：本地文本清单导入批次的总数、新增、重复和错误统计。
