@@ -328,7 +328,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <Sidebar view={view} onChange={changeView} stats={stats} config={config} />
-      <div className="app-main">
+      <div className={`app-main ${view === "resources" ? "app-main-resources" : ""}`}>
         {view !== "library" && <Topbar
           view={view}
           search={search}
