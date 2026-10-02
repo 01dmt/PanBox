@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, Clipboard, ClipboardCheck, FolderInput, LoaderCircle, MessageCircle, Radio, UploadCloud, X } from "lucide-react";
-import { getIngestionRecord, getIngestionRecords, importText } from "../api";
+import { getIngestionRecord, getIngestionRecords, importText, reprocessIgnoredIngestion } from "../api";
 import { formatDateTime, formatNumber } from "../lib/format";
 
 const SOURCE_LABELS = { telegram: "Telegram", discord: "Discord", webhook: "Webhook" };
@@ -16,6 +16,7 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [reprocessing, setReprocessing] = useState(false);
   const inputRef = useRef(null);
 
   const refresh = useCallback(() => {
@@ -26,6 +27,20 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
   }, []);
 
   useEffect(refresh, [refresh]);
+
+  const reprocessIgnored = async () => {
+    setReprocessing(true);
+    setError("");
+    try {
+      const result = await reprocessIgnoredIngestion(100);
+      setResult({ source_name: "重新识别", total: result.queued, inserted: 0, duplicates: 0, errors: 0 });
+      refresh();
+    } catch (nextError) {
+      setError(nextError.message);
+    } finally {
+      setReprocessing(false);
+    }
+  };
 
   const handleFiles = async (files) => {
     const file = files?.[0];
@@ -73,7 +88,7 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
           <div><span>今日入库数量</span><strong>{formatNumber(todayCount)}</strong><small>条消息</small></div>
           <div><span>显示记录</span><strong>{formatNumber(records.length)}</strong><small>最近 100 条</small></div>
         </div>
-        <div className="page-section-title"><h2>最近入库记录</h2><span>{records.length} 条</span></div>
+        <div className="page-section-title"><h2>最近入库记录</h2><div><span>{records.length} 条</span><button type="button" className="button small" onClick={reprocessIgnored} disabled={reprocessing}>{reprocessing ? "识别中…" : "重新识别未识别媒体"}</button></div></div>
         <div className="history-table">
           <div className="history-head ingestion-head"><span>消息来源频道</span><span>来源渠道</span><span>入库媒体</span><span>状态</span><span>时间</span></div>
           {records.map((item) => (

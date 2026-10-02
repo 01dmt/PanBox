@@ -172,6 +172,9 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
                     return
                 self._json(event)
                 return
+            if path == "/api/ingestion/reprocess":
+                self._json(ingestion.reprocess_ignored(int(body.get("limit") or 100), self.db_path))
+                return
             if path == "/api/media/filters":
                 self._json(get_media_filters(self.db_path))
                 return

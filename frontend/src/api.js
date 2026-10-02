@@ -49,6 +49,10 @@ export function getIngestionRecord(ingestionId) {
   return request(`/api/ingestion/records/${encodeURIComponent(ingestionId)}`);
 }
 
+export function reprocessIgnoredIngestion(limit = 100) {
+  return request("/api/ingestion/reprocess", { method: "POST", body: JSON.stringify({ limit }) });
+}
+
 export function getMediaFilters() {
   return request("/api/media/filters");
 }

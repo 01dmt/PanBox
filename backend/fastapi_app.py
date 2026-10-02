@@ -107,6 +107,10 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
         if not event: raise HTTPException(404, "入库记录不存在。")
         return event
 
+    @app.post("/api/ingestion/reprocess")
+    async def reprocess_ingestion(body: dict[str, Any]):
+        return ingestion.reprocess_ignored(int(body.get("limit") or 100), db())
+
     @app.get("/api/media/filters")
     async def media_filters(): return get_media_filters(db())
 

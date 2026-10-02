@@ -198,3 +198,16 @@ def get_event(ingestion_id: str, db_path=None) -> dict[str, Any] | None:
     result["media_ids"] = json.loads(result.pop("media_ids_json") or "[]")
     result["links"] = [dict(link) for link in links]
     return result
+
+
+def reprocess_ignored(limit: int = 100, db_path=None) -> dict[str, int]:
+    """Retry ignored ingestion events with the current source recognizer."""
+    bounded = min(max(int(limit), 1), 250)
+    with connect(db_path) as db:
+        rows = db.execute(
+            "SELECT id, raw_text FROM ingestion_events WHERE status = 'ignored' ORDER BY received_at DESC LIMIT ?",
+            (bounded,),
+        ).fetchall()
+    for row in rows:
+        threading.Thread(target=process, args=(row["id"], row["raw_text"], db_path), daemon=True).start()
+    return {"queued": len(rows)}
