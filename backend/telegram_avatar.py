@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import html
 import re
+import time
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 
@@ -16,6 +18,9 @@ OG_IMAGE_RE_REVERSED = re.compile(
 )
 PHOTO_RE = re.compile(r'<img\s+[^>]*class=["\'][^"\']*tgme_page_photo_image[^"\']*["\'][^>]*src=["\']([^"\']+)', re.IGNORECASE)
 ALLOWED_IMAGE_HOST_RE = re.compile(r"^cdn\d+\.telesco\.pe$", re.IGNORECASE)
+ROOT_DIR = Path(__file__).resolve().parents[1]
+AVATAR_CACHE_DIR = ROOT_DIR / "data" / "avatar-cache"
+AVATAR_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def normalize_channel_username(value: str | None) -> str | None:
@@ -56,3 +61,27 @@ def fetch_public_channel_avatar(username: str | None) -> str | None:
     if parsed.scheme != "https" or not ALLOWED_IMAGE_HOST_RE.fullmatch(parsed.hostname or ""):
         return None
     return value
+
+
+def cache_channel_avatar(username: str | None, *, force: bool = False) -> Path | None:
+    """Download a Telegram avatar locally and reuse it for a bounded TTL."""
+    username = normalize_channel_username(username)
+    if not username:
+        return None
+    AVATAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    target = AVATAR_CACHE_DIR / f"{username.casefold()}.jpg"
+    if target.exists() and not force and time.time() - target.stat().st_mtime < AVATAR_TTL_SECONDS:
+        return target
+    remote = fetch_public_channel_avatar(username)
+    if not remote:
+        return target if target.exists() else None
+    try:
+        request = Request(remote, headers={"User-Agent": "Mozilla/5.0 (PanBox avatar cache)"})
+        with urlopen(request, timeout=8) as response:
+            payload = response.read(5 * 1024 * 1024)
+        if payload:
+            target.write_bytes(payload)
+            return target
+    except Exception:
+        return target if target.exists() else None
+    return target if target.exists() else None

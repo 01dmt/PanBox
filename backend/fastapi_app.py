@@ -21,6 +21,7 @@ from .schema import ROOT_DIR, init_db, resolve_db_path
 from .share115 import Share115Error, cleanup_cancelled_shares
 from .share_audit import audit_status, pause_audit
 from .tmdb import TmdbClient, TmdbError, bulk_match, search_media
+from .telegram_avatar import AVATAR_CACHE_DIR, cache_channel_avatar, normalize_channel_username
 
 DIST_DIR = ROOT_DIR / "frontend" / "dist"
 
@@ -65,6 +66,16 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
 
     @app.get("/api/health")
     async def health(): return {"ok": True}
+
+    @app.get("/api/channel-avatar/{username}")
+    async def channel_avatar(username: str):
+        normalized = normalize_channel_username(username)
+        if not normalized:
+            raise HTTPException(404, "频道不存在。")
+        path = cache_channel_avatar(normalized)
+        if not path or not path.exists():
+            raise HTTPException(404, "频道头像暂不可用。")
+        return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
     @app.get("/api/v1/settings/ingestion")
     async def ingestion_config(request: Request):

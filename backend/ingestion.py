@@ -12,7 +12,7 @@ from .repository import import_content
 from .resource_pages import expand_resource_pages
 from .schema import connect, init_db
 from .tmdb import TmdbClient, TmdbError, search_media
-from .telegram_avatar import fetch_public_channel_avatar, normalize_channel_username
+from .telegram_avatar import cache_channel_avatar, fetch_public_channel_avatar, normalize_channel_username
 
 
 class IngestionError(ValueError):
@@ -96,10 +96,11 @@ def _refresh_channel_avatar(ingestion_id: str, source: dict[str, str | None], db
                ORDER BY received_at DESC LIMIT 1""",
             (username,),
         ).fetchone()
-    avatar_url = cached["channel_avatar_url"] if cached else fetch_public_channel_avatar(username)
+    cached_path = cache_channel_avatar(username)
+    avatar_url = f"/api/channel-avatar/{username}" if cached_path else (cached["channel_avatar_url"] if cached else fetch_public_channel_avatar(username))
     if avatar_url:
         with connect(db_path) as db:
-            db.execute("UPDATE ingestion_events SET channel_avatar_url = ? WHERE id = ?", (avatar_url, ingestion_id))
+            db.execute("UPDATE ingestion_events SET channel_avatar_url = ? WHERE channel_username = ?", (avatar_url, username))
 
 
 def receive(body: dict[str, Any], db_path=None) -> dict[str, Any]:
