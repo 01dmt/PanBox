@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, Clipboard, ClipboardCheck, FolderInput, LoaderCircle, Radio, Send, UploadCloud, X } from "lucide-react";
+import { CheckCircle2, Clipboard, ClipboardCheck, FolderInput, LoaderCircle, Send, UploadCloud, X } from "lucide-react";
 import { getIngestionRecord, getIngestionRecords, importText, reprocessIgnoredIngestion } from "../api";
 import { formatDateTime, formatNumber } from "../lib/format";
 
 const SOURCE_LABELS = { telegram: "Telegram", discord: "Discord", webhook: "Webhook" };
+
+function TelegramIcon({ size = 16 }) {
+  return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M21.7 3.3 18.5 20c-.25 1.18-.91 1.47-1.84.92l-5.1-3.76-2.46 2.37c-.27.27-.5.5-1.02.5l.37-5.2 9.46-8.55c.41-.37-.09-.58-.64-.21L5.58 13.3.52 11.72c-1.1-.35-1.12-1.1.23-1.6L20.5 2.45c.92-.34 1.73.21 1.2.85Z" /></svg>;
+}
 
 
 export default function ImportView({ onImported, manualOpen, onCloseManual }) {
@@ -97,7 +101,7 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
                 <span className="telegram-channel-avatar">{item.channel_avatar_url ? <img src={item.channel_avatar_url} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling.style.display = "grid"; }} /> : null}<span className="telegram-channel-fallback"><Send size={16} fill="currentColor" /></span></span>
                 <strong>{item.source_channel}</strong>
               </span>
-              <span><Radio size={14} />{SOURCE_LABELS[item.source_service] || item.source_service}</span>
+              <span><TelegramIcon size={15} />{SOURCE_LABELS[item.source_service] || item.source_service}</span>
               <span className="ingestion-media" title={item.media_titles?.join("、")}>{item.media_titles?.length ? item.media_titles.join("、") : "未识别媒体"}</span>
               <span className={`ingestion-status ingestion-status--${item.status}`}>{item.status === "imported" ? "已入库" : item.status === "duplicate" ? "重复" : item.status === "ignored" ? "已忽略" : item.status === "failed" ? "失败" : item.status}</span>
               <span>{formatDateTime(item.received_at)}</span>
