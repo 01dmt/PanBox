@@ -755,14 +755,14 @@ def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) 
         links = connection.execute(
             """
             SELECT l.ingestion_id, l.status AS link_status, l.provider,
-                   m.id AS media_id, COALESCE(m.tmdb_title, m.title) AS media_title,
+                   COALESCE(l.media_id, s.media_id) AS media_id, COALESCE(m.tmdb_title, m.title) AS media_title,
                    COALESCE(m.year, s.parsed_year, CASE
                        WHEN substr(m.release_date, 1, 4) GLOB '[12][0-9][0-9][0-9]'
                        THEN CAST(substr(m.release_date, 1, 4) AS INTEGER) END) AS media_year,
                    s.season, s.season_end, s.episode, s.metadata_json
             FROM ingestion_links l
-            LEFT JOIN media_items m ON m.id = l.media_id
             LEFT JOIN source_records s ON s.source_key = l.source_key
+            LEFT JOIN media_items m ON m.id = COALESCE(l.media_id, s.media_id)
             WHERE l.ingestion_id IN (SELECT id FROM ingestion_events ORDER BY received_at DESC LIMIT ?)
             ORDER BY l.id
             """,
