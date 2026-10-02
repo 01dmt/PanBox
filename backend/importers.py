@@ -170,6 +170,42 @@ def _is_generic_share_label(value: str) -> bool:
     return not compact or compact in {"链接", "点击跳转", "链接点击跳转"}
 
 
+def _extract_channel_fields(value: str) -> dict[str, object]:
+    """Keep channel-provided metadata available for later manual scraping.
+
+    Channel templates vary, so this intentionally captures both known labels
+    and unknown labelled lines instead of discarding fields we do not yet
+    understand. Values are kept as text; a later scraper can normalize them.
+    """
+    fields: dict[str, object] = {}
+    labels = {
+        "评分": "rating", "类型": "genres", "地区": "countries", "语言": "languages",
+        "主演": "cast", "导演": "directors", "简介": "overview", "投稿": "submitter",
+        "投稿人": "submitter", "搜索": "search", "机场": "airports", "包含影片": "included_films",
+        "代表作": "representative_works", "生日": "birthday", "出生地": "birthplace",
+    }
+    for raw_line in str(value or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.match(r"^\s*[^\w\u4e00-\u9fff]*([^：:]{1,12})\s*[：:]\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        label, text = match.group(1).strip(), match.group(2).strip()
+        if not text:
+            continue
+        key = labels.get(label, f"label_{normalize_title(label)}")
+        if key in fields:
+            previous = fields[key]
+            fields[key] = f"{previous}\n{text}" if isinstance(previous, str) else [*previous, text]
+        else:
+            fields[key] = text
+    # Preserve every line, including button/link lines without a colon.
+    fields["raw_lines"] = [line for line in str(value or "").splitlines() if line.strip()]
+    fields["links"] = re.findall(r"https?://[^\s<>]+", str(value or ""))
+    return fields
+
+
 def _share_heading_details(value: str) -> dict[str, object]:
     """Parse a channel-style heading such as ``📺 Title (2026) S01E02 ✨4K``."""
     heading = value.lstrip("\ufeff \t")
@@ -245,6 +281,7 @@ def _share_heading_details(value: str) -> dict[str, object]:
             }.items()
             if (match := re.search(pattern, heading, re.IGNORECASE))
         },
+        "channel_fields": _extract_channel_fields(value),
         "quality": quality_match.group(1).upper() if quality_match else None,
         "codec": codec_match.group(1).upper().replace("_", ".") if codec_match else None,
         "hdr": " + ".join(hdr_tags) if hdr_tags else None,
@@ -293,6 +330,8 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
             })
     details["media_type"] = "tv" if details.get("season") is not None or details.get("episode") is not None else details["media_type"]
 
+    channel_fields = dict(details.get("channel_fields") or {})
+    channel_fields["links"] = list(dict.fromkeys([*(channel_fields.get("links") or []), url]))
     return ParsedSource(
         source_type="115",
         provider="115",
@@ -322,6 +361,7 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
                 "media_info": details.get("media_info"),
                 "resource_kind": details.get("resource_kind"),
                 "resource_metadata": details.get("resource_metadata"),
+                "channel_fields": channel_fields,
                 "extra": suffix,
             }.items()
             if value
@@ -519,7 +559,11 @@ def parse_ed2k_link(
         audio=audio_match.group(1) if audio_match else None,
         release_group=release_group_match.group(1) if release_group_match else None,
         resource_kind=resource_kind,
-        metadata={"context": context, "resource_kind": resource_kind} if context else {},
+        metadata={
+            "context": context,
+            "resource_kind": resource_kind,
+            "channel_fields": _extract_channel_fields(context),
+        } if context else {},
     )
 
 

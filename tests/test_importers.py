@@ -111,6 +111,20 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual((series.title, series.resource_kind), ("角头", "series"))
         self.assertEqual(series.metadata["resource_metadata"]["included_films"], "角头、角头2")
 
+    def test_preserves_channel_fields_for_manual_scraping(self) -> None:
+        source = next(iter_share_sources(
+            "📺 毒枭：墨西哥 (2018) S1-S3全集\n"
+            "🌟 评分： 7.9\n📽 类型： 剧情, 犯罪\n🌍 地区： United States of America\n"
+            "👥 主演： 演员甲, 演员乙\n📖 简介： 一段简介\n"
+            "🔗 链接： 点击跳转 https://115cdn.com/s/example?password=x\n"
+        ))
+        fields = source.metadata["channel_fields"]
+        self.assertEqual(fields["rating"], "7.9")
+        self.assertEqual(fields["genres"], "剧情, 犯罪")
+        self.assertEqual(fields["cast"], "演员甲, 演员乙")
+        self.assertIn("https://115cdn.com/s/example?password=x", fields["links"])
+        self.assertGreaterEqual(len(fields["raw_lines"]), 5)
+
     def test_115_share_domain_is_used_in_source_key(self) -> None:
         source = parse_share_line("标题 (2024) https://115.com/s/example?password=abcd")
         self.assertEqual(source.source_key, "115:https://115.com/s/example?password=abcd")
