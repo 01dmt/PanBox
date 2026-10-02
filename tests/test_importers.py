@@ -122,8 +122,9 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(fields["rating"], "7.9")
         self.assertEqual(fields["genres"], "剧情, 犯罪")
         self.assertEqual(fields["cast"], "演员甲, 演员乙")
-        self.assertIn("https://115cdn.com/s/example?password=x", fields["links"])
-        self.assertGreaterEqual(len(fields["raw_lines"]), 5)
+        self.assertNotIn("links", fields)
+        self.assertNotIn("raw_lines", fields)
+        self.assertEqual(source.url, "https://115cdn.com/s/example?password=x")
 
     def test_115_share_domain_is_used_in_source_key(self) -> None:
         source = parse_share_line("标题 (2024) https://115.com/s/example?password=abcd")

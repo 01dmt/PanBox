@@ -200,9 +200,6 @@ def _extract_channel_fields(value: str) -> dict[str, object]:
             fields[key] = f"{previous}\n{text}" if isinstance(previous, str) else [*previous, text]
         else:
             fields[key] = text
-    # Preserve every line, including button/link lines without a colon.
-    fields["raw_lines"] = [line for line in str(value or "").splitlines() if line.strip()]
-    fields["links"] = re.findall(r"https?://[^\s<>]+", str(value or ""))
     return fields
 
 
@@ -330,8 +327,6 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
             })
     details["media_type"] = "tv" if details.get("season") is not None or details.get("episode") is not None else details["media_type"]
 
-    channel_fields = dict(details.get("channel_fields") or {})
-    channel_fields["links"] = list(dict.fromkeys([*(channel_fields.get("links") or []), url]))
     return ParsedSource(
         source_type="115",
         provider="115",
@@ -361,7 +356,7 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
                 "media_info": details.get("media_info"),
                 "resource_kind": details.get("resource_kind"),
                 "resource_metadata": details.get("resource_metadata"),
-                "channel_fields": channel_fields,
+                "channel_fields": details.get("channel_fields"),
                 "extra": suffix,
             }.items()
             if value
