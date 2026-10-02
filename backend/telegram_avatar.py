@@ -10,6 +10,10 @@ OG_IMAGE_RE = re.compile(
     r'<meta\s+[^>]*property=["\'](?:og:image|twitter:image)["\'][^>]*content=["\']([^"\']+)',
     re.IGNORECASE,
 )
+OG_IMAGE_RE_REVERSED = re.compile(
+    r'<meta\s+[^>]*content=["\']([^"\']+)["\'][^>]*property=["\'](?:og:image|twitter:image)["\']',
+    re.IGNORECASE,
+)
 PHOTO_RE = re.compile(r'<img\s+[^>]*class=["\'][^"\']*tgme_page_photo_image[^"\']*["\'][^>]*src=["\']([^"\']+)', re.IGNORECASE)
 ALLOWED_IMAGE_HOST_RE = re.compile(r"^cdn\d+\.telesco\.pe$", re.IGNORECASE)
 
@@ -40,7 +44,7 @@ def fetch_public_channel_avatar(username: str | None) -> str | None:
             page = response.read(512 * 1024).decode("utf-8", errors="replace")
     except Exception:
         return None
-    match = OG_IMAGE_RE.search(page) or PHOTO_RE.search(page)
+    match = OG_IMAGE_RE.search(page) or OG_IMAGE_RE_REVERSED.search(page) or PHOTO_RE.search(page)
     if not match:
         return None
     value = html.unescape(match.group(1)).strip()
