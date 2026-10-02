@@ -2493,3 +2493,6 @@ select:focus-visible {
 .app-main-resources { overflow-y: auto; overflow-x: hidden; }
 .app-main-resources .resource-library-layout { padding-bottom: 32px; }
 @media (max-width: 760px) { .app-main-resources { overflow: visible; } }
+.telegram-channel-avatar { display:grid; place-items:center; width:24px; height:24px; flex:0 0 24px; overflow:hidden; color:#fff; background:#229ed9; border-radius:50%; }
+.telegram-channel-avatar img { width:24px; height:24px; border-radius:50%; }
+.telegram-channel-fallback { display:grid; place-items:center; }

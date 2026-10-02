@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, Clipboard, ClipboardCheck, FolderInput, LoaderCircle, MessageCircle, Radio, UploadCloud, X } from "lucide-react";
+import { CheckCircle2, Clipboard, ClipboardCheck, FolderInput, LoaderCircle, Radio, Send, UploadCloud, X } from "lucide-react";
 import { getIngestionRecord, getIngestionRecords, importText, reprocessIgnoredIngestion } from "../api";
 import { formatDateTime, formatNumber } from "../lib/format";
 
@@ -94,7 +94,7 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
           {records.map((item) => (
             <button className="history-row history-row-button" type="button" key={item.id} onClick={() => openRecord(item)} aria-label={`查看 ${item.source_channel} 的消息明细`}>
               <span className="ingestion-channel">
-                {item.channel_avatar_url ? <img src={item.channel_avatar_url} alt="" loading="lazy" /> : <MessageCircle size={16} />}
+                <span className="telegram-channel-avatar">{item.channel_avatar_url ? <img src={item.channel_avatar_url} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling.style.display = "grid"; }} /> : null}<span className="telegram-channel-fallback"><Send size={16} fill="currentColor" /></span></span>
                 <strong>{item.source_channel}</strong>
               </span>
               <span><Radio size={14} />{SOURCE_LABELS[item.source_service] || item.source_service}</span>
