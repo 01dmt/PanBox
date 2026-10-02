@@ -26,6 +26,7 @@ import ShareAuditStatus from "./components/ShareAuditStatus";
 import LibraryHero from "./components/LibraryHero";
 import CinematicFilters from "./components/CinematicFilters";
 import CinematicPosterGrid from "./components/CinematicPosterGrid";
+import ResourceLibrary from "./components/ResourceLibrary";
 
 
 const DATA_VIEWS = new Set(["library", "resources", "pending", "duplicates"]);
@@ -373,8 +374,9 @@ export default function App() {
         ) : DATA_VIEWS.has(view) ? (
           <>
             <StatsBar stats={stats} activeView={view} />
-            <div className="workspace-grid">
-              <main className="library-panel">
+            {view === "resources" ? <ResourceLibrary items={pageData.items} loading={loading} selectedId={selectedId} onSelect={selectItem} total={pageData.total} page={pageData.page} pages={pageData.pages} onPageChange={(page) => changeFilters({ page })} /> : null}
+            <div className={`workspace-grid ${view === "resources" ? "resource-workspace-hidden" : ""}`}>
+              <main className={`library-panel ${view === "resources" ? "resource-library-hidden" : ""}`}>
                 <FilterToolbar
                   view={view}
                   filters={filters}
