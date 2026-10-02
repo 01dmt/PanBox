@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS media_items (
     year INTEGER,
     media_type TEXT NOT NULL DEFAULT 'unknown'
         CHECK (media_type IN ('movie', 'tv', 'unknown')),
+    resource_kind TEXT NOT NULL DEFAULT 'media'
+        CHECK (resource_kind IN ('media', 'person', 'series')),
+    resource_metadata_json TEXT NOT NULL DEFAULT '{}',
     tmdb_id INTEGER,
     tmdb_media_type TEXT CHECK (tmdb_media_type IN ('movie', 'tv') OR tmdb_media_type IS NULL),
     tmdb_status TEXT NOT NULL DEFAULT 'pending'
@@ -181,6 +184,19 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
             connection.execute("ALTER TABLE source_records ADD COLUMN provider TEXT NOT NULL DEFAULT '115'")
         if "season_end" not in columns:
             connection.execute("ALTER TABLE source_records ADD COLUMN season_end INTEGER")
+        media_columns = {row["name"] for row in connection.execute("PRAGMA table_info(media_items)")}
+        if "resource_kind" not in media_columns:
+            connection.execute("ALTER TABLE media_items ADD COLUMN resource_kind TEXT NOT NULL DEFAULT 'media'")
+        if "resource_metadata_json" not in media_columns:
+            connection.execute("ALTER TABLE media_items ADD COLUMN resource_metadata_json TEXT NOT NULL DEFAULT '{}'")
+        connection.execute("""
+            UPDATE media_items
+            SET resource_kind = CASE
+                WHEN EXISTS (SELECT 1 FROM source_records s WHERE s.media_id = media_items.id AND json_extract(s.metadata_json, '$.context') LIKE '%👤%') THEN 'person'
+                WHEN EXISTS (SELECT 1 FROM source_records s WHERE s.media_id = media_items.id AND json_extract(s.metadata_json, '$.context') LIKE '%🗂%') THEN 'series'
+                ELSE resource_kind END
+            WHERE resource_kind = 'media'
+        """)
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_provider ON source_records(provider)")
         ingestion_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ingestion_events)")}
         for name, definition in (

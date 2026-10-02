@@ -5,12 +5,13 @@ import { formatNumber } from "../lib/format";
 
 const AVAILABILITY = [["all", "全部作品"], ["available", "有资源"], ["missing", "无资源"]];
 const TYPES = [["all", "全部类型"], ["movie", "电影"], ["tv", "剧集"], ["unknown", "待判断"]];
+const RESOURCE_KINDS = [["all", "全部资源"], ["media", "影视"], ["person", "人物"], ["series", "系列"]];
 const SOURCES = [["all", "全部来源"], ["115", "115 分享"], ["ed2k", "ED2K"]];
 const STATUSES = [["all", "全部状态"], ["matched", "已匹配"], ["pending", "全部待处理"], ["unsearched", "未搜索"], ["review", "待确认"], ["not_found", "未找到"], ["error", "匹配错误"]];
 const QUALITIES = [["all", "全部清晰度"], ["2160P", "4K / 2160P"], ["1080P", "1080P"], ["1080I", "1080I"], ["720P", "720P"], ["480P", "480P"], ["unknown", "未识别"]];
 const CODECS = [["all", "全部编码"], ["h265", "H.265 / HEVC"], ["h264", "H.264 / AVC"], ["av1", "AV1"], ["unknown", "未识别"]];
 const HDR = [["all", "全部动态范围"], ["dv", "杜比视界 / DV"], ["hdr", "HDR / HDR10+"], ["sdr", "SDR"], ["unknown", "未识别"]];
-const FIELDS = { availability: "资源", type: "类型", source: "来源", status: "匹配状态", year: "年份", genre: "题材", country: "国家 / 地区", quality: "清晰度", codec: "编码", hdr: "动态范围" };
+const FIELDS = { availability: "资源", type: "类型", resource_kind: "资源分类", source: "来源", status: "匹配状态", year: "年份", genre: "题材", country: "国家 / 地区", quality: "清晰度", codec: "编码", hdr: "动态范围" };
 const ADVANCED = ["year", "genre", "country", "quality", "codec", "hdr"];
 const regionNames = new Intl.DisplayNames(["zh-CN"], { type: "region", style: "short" });
 
@@ -30,7 +31,7 @@ export default function FilterToolbar({ view, filters, options, search, total, l
   const genreOptions = [["all", "全部题材"], ...(options?.genres || []).map(({ id, name }) => [String(id), ({ 10765: "科幻与奇幻", 10768: "战争与政治" })[id] || name])];
   const countryOptions = [["all", "全部国家 / 地区"], ...(options?.countries || []).map((code) => [code, regionNames.of(code)])];
   const statusOptions = view === "pending" ? [["all", "全部待处理"], ...STATUSES.filter(([id]) => !["all", "matched", "pending"].includes(id))] : STATUSES;
-  const choices = { availability: AVAILABILITY, type: TYPES, source: SOURCES, status: statusOptions,
+  const choices = { availability: AVAILABILITY, type: TYPES, resource_kind: RESOURCE_KINDS, source: SOURCES, status: statusOptions,
     year: [["all", "全部年份"], ["unknown", "年份未知"], ...years, ...decades], genre: genreOptions,
     country: countryOptions, quality: QUALITIES, codec: CODECS, hdr: HDR };
   const active = Object.keys(FIELDS).filter((key) => filters[key] && filters[key] !== "all");
@@ -55,7 +56,7 @@ export default function FilterToolbar({ view, filters, options, search, total, l
         </div>
       </div>
       <div className="filter-main">
-        {["availability", "type", "source", "status"].map((key) => <SelectFilter key={key} name={key} label={FIELDS[key]} value={filters[key]} options={choices[key]} onChange={onChange} />)}
+        {["availability", "type", ...(view === "resources" ? ["resource_kind"] : []), "source", "status"].map((key) => <SelectFilter key={key} name={key} label={FIELDS[key]} value={filters[key] || "all"} options={choices[key]} onChange={onChange} />)}
       </div>
       {expanded ? <div className="filter-advanced" id="advanced-resource-filters">
         <SelectFilter name="year" label="年份" value={filters.year} options={[["all", "全部年份"], ["unknown", "年份未知"]]} onChange={onChange}>

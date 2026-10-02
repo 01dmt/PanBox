@@ -85,7 +85,7 @@ PanBox 是本地优先的影视资料库，用于接收外部频道转发的资�
 
 ## 4. 数据模型与标识规则
 
-- `media_items`：作品主记录、年份、媒体类型、TMDB 元数据和匹配状态。
+- `media_items`：资源主记录、资源分类（影视/人物/系列）、年份、媒体类型、专属资料 JSON、TMDB 元数据和匹配状态。
 - `source_records`：115 分享或 ED2K 文件来源；来源可多对一关联作品。115 使用规范化完整 URL，ED2K 使用哈希幂等；剧集来源保存 `season`、`season_end` 和 `episode`，支持整季及跨季合集。
 - `ingestion_events`：外部消息接收记录，保存 `service`、`channel_id`、`channel_name`、`channel_username`、`message_id`、`message_url`、原文、处理状态和频道头像 URL。
 - `ingestion_links`：一条入库消息提取出的每个来源及其 `inserted`、`duplicate`、`error` 状态。
@@ -142,6 +142,7 @@ PanBox 是本地优先的影视资料库，用于接收外部频道转发的资�
 
 - 频道标题行与下一行链接可以组合；解析 `年份`、`S01E14`、`4K`、编码、HDR、音轨和发布组。
 - `telegra.ph` 的“查看资源”链接会抓取页面中的 115/ED2K 来源；页面标题用于归并同页资源，原始转发正文仍保存在 `ingestion_events.raw_text`。
+- 标题前缀 `📺`、`🎥` 分别识别为剧集和电影；`👤` 识别为人物并缓存生日、出生地、代表作；`🗂` 识别为系列并缓存“包含影片”。人物和系列不进入 TMDB 自动刮削。
 - `115cdn.com`、`115.com`、`www.115.com` 作为同一提供方处理，但数据库保留原始完整链接。
 - `metadata_json` 保存解析上下文、媒体信息和 115 目录快照，避免以后重新访问页面才能还原识别依据。
 - 解析器升级后重新导入同一来源会刷新未知占位记录的解析字段，不覆盖已有 TMDB 确认身份。

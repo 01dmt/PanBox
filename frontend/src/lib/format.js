@@ -43,6 +43,12 @@ export function displayMediaType(value) {
   return "待判断";
 }
 
+export function displayResourceKind(value) {
+  if (value === "person") return "人物";
+  if (value === "series") return "系列";
+  return "影视";
+}
+
 export function displayStatus(value) {
   const labels = {
     matched: "已匹配",

@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import {
   displayMediaType,
+  displayResourceKind,
   displayStatus,
   formatNumber,
   posterUrl,
@@ -25,7 +26,7 @@ function MediaCard({ item, selectedId, onSelect }) {
   const episodeInfo = item.media_type === "tv" && (item.episode_count || item.max_season)
     ? `${item.max_season ? `${item.max_season} 季` : ""}${item.max_season && item.episode_count ? " · " : ""}${item.episode_count ? `${item.episode_count} 集` : ""}` : null;
   return <button type="button" className={`media-card ${selectedId === item.id ? "selected" : ""}`} aria-pressed={selectedId === item.id} onClick={() => onSelect(item.id)}>
-    <div className="media-card-poster"><img src={posterUrl(item.poster_path, "w342")} alt={title} loading="lazy" /><span className="media-card-type">{displayMediaType(item.media_type)}</span>{qualities[0] ? <span className="media-card-quality">{qualities[0]}</span> : null}<span className="media-card-rating">★ {item.vote_average ? Number(item.vote_average).toFixed(1) : "—"}</span></div>
+    <div className="media-card-poster"><img src={posterUrl(item.poster_path, "w342")} alt={title} loading="lazy" /><span className="media-card-type">{displayResourceKind(item.resource_kind)}</span>{qualities[0] ? <span className="media-card-quality">{qualities[0]}</span> : null}<span className="media-card-rating">★ {item.vote_average ? Number(item.vote_average).toFixed(1) : "—"}</span></div>
     <div className="media-card-meta"><strong title={title}>{title}</strong><span>{year} · {matchingSources ? `${formatNumber(matchingSources)} 个来源` : "无资源"}{episodeInfo ? ` · ${episodeInfo}` : ""}</span><small className={`card-status card-status-${item.tmdb_status || "pending"}`}>{displayStatus(item.tmdb_status)}</small></div>
   </button>;
 }

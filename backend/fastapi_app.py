@@ -111,8 +111,8 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
     async def media_filters(): return get_media_filters(db())
 
     @app.get("/api/media")
-    async def media(q: str = "", status: str = "all", type: str = "all", source: str = "all", availability: str = "all", year: str = "all", genre: str = "all", country: str = "all", quality: str = "all", codec: str = "all", hdr: str = "all", multi_source: bool = False, sort: str = "updated_desc", page: int = 1, page_size: int = 30):
-        return list_media(query=q, status=status, media_type=type, source_type=source, availability=availability, year=year, genre=genre, country=country, quality=quality, codec=codec, hdr=hdr, multi_source_only=multi_source, sort=sort, page=page, page_size=page_size, db_path=db())
+    async def media(q: str = "", status: str = "all", type: str = "all", resource_kind: str = "all", source: str = "all", availability: str = "all", year: str = "all", genre: str = "all", country: str = "all", quality: str = "all", codec: str = "all", hdr: str = "all", multi_source: bool = False, sort: str = "updated_desc", page: int = 1, page_size: int = 30):
+        return list_media(query=q, status=status, media_type=type, resource_kind=resource_kind, source_type=source, availability=availability, year=year, genre=genre, country=country, quality=quality, codec=codec, hdr=hdr, multi_source_only=multi_source, sort=sort, page=page, page_size=page_size, db_path=db())
 
     @app.get("/api/media/{media_id}")
     async def media_detail(media_id: int):

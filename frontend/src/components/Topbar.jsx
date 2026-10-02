@@ -3,7 +3,8 @@ import { FolderInput, RefreshCw, Search, X } from "lucide-react";
 
 const TITLES = {
   dashboard: "仪表盘",
-  library: "资料库",
+  library: "影视库",
+  resources: "资源库",
   pending: "待匹配",
   duplicates: "多来源作品",
   imports: "入库记录",
@@ -21,7 +22,7 @@ export default function Topbar({
   onSync,
   onManualImport,
 }) {
-  const dataView = ["library", "pending", "duplicates"].includes(view);
+  const dataView = ["library", "resources", "pending", "duplicates"].includes(view);
   return (
     <header className={`topbar ${view === "library" ? "topbar--library" : ""}`}>
       <div className="mobile-title">{TITLES[view]}</div>

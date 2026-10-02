@@ -110,6 +110,7 @@ class ParsedSource:
     raw_text: str
     url: str
     provider: str = "115"
+    resource_kind: str = "media"
     filename: Optional[str] = None
     file_size: Optional[int] = None
     ed2k_hash: Optional[str] = None
@@ -172,7 +173,9 @@ def _is_generic_share_label(value: str) -> bool:
 def _share_heading_details(value: str) -> dict[str, object]:
     """Parse a channel-style heading such as ``📺 Title (2026) S01E02 ✨4K``."""
     heading = value.lstrip("\ufeff \t")
-    heading = re.sub(r"^\s*[📺🎬🍿🎞️]+\s*", "", heading)
+    marker = re.match(r"^\s*([📺🎥🎬👤🗂])", heading)
+    resource_kind = "person" if marker and marker.group(1) == "👤" else "series" if marker and marker.group(1) == "🗂" else "media"
+    heading = re.sub(r"^\s*[📺🎥🎬👤🗂🍿🎞️]+\s*", "", heading)
     year_match = SHARE_HEADER_YEAR_RE.search(heading) or YEAR_RE.search(heading)
     episode_match = SHARE_EPISODE_RE.search(heading)
     season_range_match = SHARE_SEASON_RANGE_RE.search(heading)
@@ -183,6 +186,9 @@ def _share_heading_details(value: str) -> dict[str, object]:
     cut_points = [match.start() for match in (year_match, episode_match, quality_match, technical_match) if match]
     title = heading[: min(cut_points)] if cut_points else heading
     title = title.strip(" \t-–—|·()（）[]【】✨") or "未命名"
+    title = title.splitlines()[0].strip(" \t-–—|·()（）[]【】✨") or "未命名"
+    if resource_kind == "series":
+        title = re.sub(r"\s*[（(]系列[）)]?\s*$", "", title).strip() or title
     year = int(year_match.group(1)) if year_match else None
     season = int(season_match.group(1)) if season_match else None
     episode = int(episode_match.group(2)) if episode_match else None
@@ -214,7 +220,13 @@ def _share_heading_details(value: str) -> dict[str, object]:
             hdr_tags.append(label)
 
     media_type = "tv" if season is not None or episode is not None else infer_share_media_type(title, heading)
-    media_info = heading[technical_match.start() :].strip(" \t✨") if technical_match else None
+    if marker and marker.group(1) == "📺":
+        media_type = "tv"
+    elif marker and marker.group(1) in {"🎥", "🎬"}:
+        media_type = "movie"
+    if resource_kind != "media":
+        media_type = "unknown"
+    media_info = heading[technical_match.start() :].splitlines()[0].strip(" \t✨") if technical_match else None
     return {
         "title": title,
         "year": year,
@@ -222,6 +234,17 @@ def _share_heading_details(value: str) -> dict[str, object]:
         "season_end": season_end if season_end and season_end > season else None,
         "episode": episode,
         "media_type": media_type,
+        "resource_kind": resource_kind,
+        "resource_metadata": {
+            key: match.group(1).strip()
+            for key, pattern in {
+                "birthday": r"生日\s*[：:]\s*([^\n]+)",
+                "birthplace": r"出生地\s*[：:]\s*([^\n]+)",
+                "representative_works": r"代表作\s*[：:]\s*([^\n]+)",
+                "included_films": r"包含影片\s*[：:]\s*([^\n]+)",
+            }.items()
+            if (match := re.search(pattern, heading, re.IGNORECASE))
+        },
         "quality": quality_match.group(1).upper() if quality_match else None,
         "codec": codec_match.group(1).upper().replace("_", ".") if codec_match else None,
         "hdr": " + ".join(hdr_tags) if hdr_tags else None,
@@ -232,12 +255,13 @@ def _share_heading_details(value: str) -> dict[str, object]:
 
 def _find_share_heading(lines: list[str], index: int) -> str | None:
     """Find the title line preceding a generic link label in one forwarded message."""
-    for previous in reversed(lines[:index]):
+    for position in range(index - 1, -1, -1):
+        previous = lines[position]
         candidate = previous.strip()
         if not candidate or candidate.startswith(SHARE_METADATA_PREFIXES):
             continue
-        if "📺" in candidate:
-            return candidate
+        if any(marker in candidate for marker in ("📺", "🎥", "👤", "🗂")):
+            return "\n".join(line.strip() for line in lines[position:index] if line.strip())
     for previous in lines[:index]:
         candidate = previous.strip()
         if candidate and not candidate.startswith(SHARE_METADATA_PREFIXES) and not SHARE_URL_RE.search(candidate):
@@ -276,6 +300,7 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
         title=str(details["title"]),
         year=details["year"],
         media_type=str(details["media_type"]),
+        resource_kind=str(details.get("resource_kind") or "media"),
         # Keep the searchable label clean; retain the complete channel heading
         # in metadata so media details remain available without polluting title
         # matching with the episode and quality suffix.
@@ -295,6 +320,8 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
                 "context": heading,
                 "season_range": [details["season"], details["season_end"]] if details.get("season_end") else None,
                 "media_info": details.get("media_info"),
+                "resource_kind": details.get("resource_kind"),
+                "resource_metadata": details.get("resource_metadata"),
                 "extra": suffix,
             }.items()
             if value
@@ -462,7 +489,7 @@ def parse_ed2k_link(
 
     release_group_match = re.search(r"-([A-Za-z0-9]+)$", stem)
 
-    context_value = re.sub(r"^\s*[📺🎬🍿🎞️]+\s*", "", context or "")
+    context_value = re.sub(r"^\s*[📺🎥🎬👤🗂🍿🎞️]+\s*", "", context or "")
     context_title, context_year = parse_title_year(context_value) if context else ("", None)
     if context_title and context_title != "未命名" and not context_title.lower().startswith("链接"):
         title = context_title
@@ -500,7 +527,7 @@ def _find_ed2k_heading(lines: list[str], index: int) -> str | None:
             continue
         if candidate.lower().startswith("ed2k://"):
             continue
-        if candidate.startswith(("📺", "🎬")):
+        if candidate.startswith(("📺", "🎥", "👤", "🗂")):
             return candidate
         break
     return None

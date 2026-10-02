@@ -68,22 +68,24 @@ def ensure_media(connection: sqlite3.Connection, source: ParsedSource) -> int:
             media_type = source.media_type
         year = existing["year"] if existing["year"] is not None else source.year
         connection.execute(
-            "UPDATE media_items SET media_type = ?, year = ?, updated_at = ? WHERE id = ?",
-            (media_type, year, now, existing["id"]),
+            "UPDATE media_items SET media_type = ?, resource_kind = ?, year = ?, updated_at = ? WHERE id = ?",
+            (media_type, source.resource_kind, year, now, existing["id"]),
         )
         return int(existing["id"])
 
     cursor = connection.execute(
         """
         INSERT INTO media_items (
-            title, normalized_title, year, media_type, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            title, normalized_title, year, media_type, resource_kind, resource_metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source.title,
             normalize_title(source.title),
             source.year,
             source.media_type,
+            source.resource_kind,
+            json.dumps(source.metadata, ensure_ascii=False),
             now,
             now,
         ),
@@ -430,6 +432,7 @@ def list_media(
     query: str = "",
     status: str = "all",
     media_type: str = "all",
+    resource_kind: str = "all",
     source_type: str = "all",
     availability: str = "all",
     year: str = "all",
@@ -513,6 +516,9 @@ def list_media(
     if media_type in {"movie", "tv", "unknown"}:
         where.append("m.media_type = ?")
         params.append(media_type)
+    if resource_kind in {"media", "person", "series"}:
+        where.append("m.resource_kind = ?")
+        params.append(resource_kind)
 
     if year == "unknown":
         where.append(f"{MEDIA_YEAR_SQL} IS NULL")

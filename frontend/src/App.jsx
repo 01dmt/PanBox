@@ -28,11 +28,12 @@ import CinematicFilters from "./components/CinematicFilters";
 import CinematicPosterGrid from "./components/CinematicPosterGrid";
 
 
-const DATA_VIEWS = new Set(["library", "pending", "duplicates"]);
+const DATA_VIEWS = new Set(["library", "resources", "pending", "duplicates"]);
 
 const DEFAULT_FILTERS = {
   status: "all",
   type: "all",
+  resource_kind: "all",
   source: "all",
   availability: "available",
   year: "all",
@@ -76,6 +77,7 @@ export default function App() {
       q: deferredSearch,
       status,
       type: filters.type,
+      resource_kind: view === "library" ? "media" : view === "resources" ? "all" : "all",
       source: filters.source,
       availability: filters.availability,
       year: filters.year,
@@ -344,7 +346,7 @@ export default function App() {
           onManualImport={() => setManualImportOpen(true)}
         />}
 
-        {view !== "dashboard" && view !== "library" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
+        {view !== "dashboard" && view !== "library" && view !== "resources" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
         {error ? (
           <div className="message-banner error" role="alert">
             {error}

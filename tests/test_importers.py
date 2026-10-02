@@ -103,6 +103,14 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(source.metadata["media_info"], "4K WEB-DL DDP 5 1")
         self.assertEqual(source.raw_label, "余红旧事")
 
+    def test_classifies_person_and_series_resource_headings(self) -> None:
+        person = parse_share_line("🔗 https://115cdn.com/s/person?password=x", context="👤 陈百强\n🎂 生日：1958-09-07\n🏠 出生地：British Hong Kong\n📚 代表作：秋天的童话")
+        series = parse_share_line("🔗 https://115cdn.com/s/series?password=x", context="🗂 角头（系列）\n📀 包含影片：角头、角头2")
+        self.assertEqual((person.title, person.resource_kind, person.media_type), ("陈百强", "person", "unknown"))
+        self.assertEqual(person.metadata["resource_metadata"]["birthday"], "1958-09-07")
+        self.assertEqual((series.title, series.resource_kind), ("角头", "series"))
+        self.assertEqual(series.metadata["resource_metadata"]["included_films"], "角头、角头2")
+
     def test_115_share_domain_is_used_in_source_key(self) -> None:
         source = parse_share_line("标题 (2024) https://115.com/s/example?password=abcd")
         self.assertEqual(source.source_key, "115:https://115.com/s/example?password=abcd")

@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import {
   displayMediaType,
+  displayResourceKind,
   displayStatus,
   formatBytes,
   maskedSource,
@@ -258,11 +259,13 @@ export default function Inspector({
               {item.original_title ? <p>{item.original_title}</p> : null}
               <dl>
                 <div><dt>年份</dt><dd>{item.year || item.release_date?.slice(0, 4) || "—"}</dd></div>
+                <div><dt>资源分类</dt><dd>{displayResourceKind(item.resource_kind)}</dd></div>
                 <div><dt>类型</dt><dd>{displayMediaType(item.media_type)}</dd></div>
                 <div><dt>来源</dt><dd>{item.source_count} 条</dd></div>
                 {item.episode_count ? <div><dt>剧集</dt><dd>{item.episode_count} 集 / {item.max_season || 1} 季</dd></div> : null}
                 {item.tmdb_id ? <div><dt>TMDB</dt><dd>#{item.tmdb_id}</dd></div> : null}
               </dl>
+              {item.resource_kind !== "media" && parseJson(item.resource_metadata_json, {}).resource_metadata ? <div className="genre-line resource-facts">{Object.entries(parseJson(item.resource_metadata_json, {}).resource_metadata).map(([key, value]) => <span key={key}>{value}</span>)}</div> : null}
               {genres.length ? <div className="genre-line">{genres.slice(0, 4).map((genre) => <span key={genre.id}>{genre.name}</span>)}</div> : null}
             </div>
           </section>

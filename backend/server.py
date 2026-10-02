@@ -181,6 +181,7 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
                         query=_first(query, "q", ""),
                         status=_first(query, "status", "all"),
                         media_type=_first(query, "type", "all"),
+                        resource_kind=_first(query, "resource_kind", "all"),
                         source_type=_first(query, "source", "all"),
                         availability=_first(query, "availability", "all"),
                         year=_first(query, "year", "all"),
