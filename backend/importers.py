@@ -40,6 +40,7 @@ SHARE_AUDIO_RE = re.compile(
     r"(?:\s*([0-9]+)(?:[.\s]+([0-9]+))?)?(?:[.\s]*(Atmos))?\b"
 )
 SHARE_EPISODE_RE = re.compile(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b")
+SHARE_EPISODE_RANGE_RE = re.compile(r"(?i)\bE(\d{1,3})\s*[-~]\s*E(\d{1,3})\b")
 SHARE_SEASON_RANGE_RE = re.compile(r"(?i)\bS(\d{1,2})\s*[-~]\s*S?(\d{1,2})(?=$|\D)")
 SHARE_SEASON_RE = re.compile(r"(?i)\bS(\d{1,2})\b")
 SHARE_HEADER_YEAR_RE = re.compile(r"[\(\[（【]\s*((?:19|20)\d{2})\s*[\)\]）】]")
@@ -211,6 +212,7 @@ def _share_heading_details(value: str) -> dict[str, object]:
     heading = re.sub(r"^\s*[📺🎥🎬👤🗂🍿🎞️]+\s*", "", heading)
     year_match = SHARE_HEADER_YEAR_RE.search(heading) or YEAR_RE.search(heading)
     episode_match = SHARE_EPISODE_RE.search(heading)
+    episode_range_match = SHARE_EPISODE_RANGE_RE.search(heading)
     season_range_match = SHARE_SEASON_RANGE_RE.search(heading)
     season_match = episode_match or season_range_match or SHARE_SEASON_RE.search(heading)
     quality_match = QUALITY_RE.search(heading)
@@ -224,7 +226,9 @@ def _share_heading_details(value: str) -> dict[str, object]:
         title = re.sub(r"\s*[（(]系列[）)]?\s*$", "", title).strip() or title
     year = int(year_match.group(1)) if year_match else None
     season = int(season_match.group(1)) if season_match else None
-    episode = int(episode_match.group(2)) if episode_match else None
+    episode = int(episode_match.group(2)) if episode_match else (int(episode_range_match.group(1)) if episode_range_match else None)
+    if episode_range_match and not season_match:
+        season = 1
     season_end = int(season_range_match.group(2)) if season_range_match else None
 
     audio_match = SHARE_AUDIO_RE.search(heading)
@@ -284,6 +288,7 @@ def _share_heading_details(value: str) -> dict[str, object]:
         "hdr": " + ".join(hdr_tags) if hdr_tags else None,
         "audio": audio,
         "media_info": media_info,
+        "episode_range": [int(episode_range_match.group(1)), int(episode_range_match.group(2))] if episode_range_match else None,
     }
 
 
@@ -353,6 +358,7 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
             for key, value in {
                 "context": heading,
                 "season_range": [details["season"], details["season_end"]] if details.get("season_end") else None,
+                "episode_range": details.get("episode_range"),
                 "media_info": details.get("media_info"),
                 "resource_kind": details.get("resource_kind"),
                 "resource_metadata": details.get("resource_metadata"),

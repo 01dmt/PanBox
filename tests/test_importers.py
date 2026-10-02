@@ -108,7 +108,8 @@ class ImporterTests(unittest.TestCase):
             "🔗 https://115cdn.com/s/example?password=x",
             context="死有对证（2026）\n📁 收录版本：E01-E15（双版本均带国语）",
         )
-        self.assertEqual((source.title, source.year, source.media_type), ("死有对证", 2026, "tv"))
+        self.assertEqual((source.title, source.year, source.media_type, source.season, source.episode), ("死有对证", 2026, "tv", 1, 1))
+        self.assertEqual(source.metadata["episode_range"], [1, 15])
 
     def test_classifies_person_and_series_resource_headings(self) -> None:
         person = parse_share_line("🔗 https://115cdn.com/s/person?password=x", context="👤 陈百强\n🎂 生日：1958-09-07\n🏠 出生地：British Hong Kong\n📚 代表作：秋天的童话")
