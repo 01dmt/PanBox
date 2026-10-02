@@ -315,6 +315,23 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
                     seen_terms.add(query_key)
                     terms.append(SearchTerm(title=title, year=effective_year))
 
+    # Telegram channel messages use a stable heading convention. Prefer the
+    # heading's explicit TMDB id, then its ``Title (Year)`` identity before
+    # considering noisy source filenames or placeholder channel fields.
+    channel_heading = re.compile(r"(?m)^\s*[📺🎥🎬]\s*(.+?)\s*[（(]\s*((?:19|20)\d{2})\s*[）)]")
+    for source in item.get("sources") or []:
+        raw_text = source.get("raw_text")
+        if not isinstance(raw_text, str):
+            continue
+        for tmdb_id in extract_tmdb_ids(raw_text):
+            if tmdb_id not in seen_ids:
+                seen_ids.add(tmdb_id)
+                explicit_ids.append(tmdb_id)
+        match = channel_heading.search(raw_text)
+        if match:
+            add_value(f"{match.group(1).strip()} ({match.group(2)})", label=True)
+            episodic = episodic or raw_text.lstrip().startswith("📺")
+
     add_year(item.get("year"))
     add_value(item.get("title"), item.get("year"), label=True)
     ed2k_names = [s["filename"] for s in item.get("sources") or [] if s.get("source_type") == "ed2k" and s.get("filename")]
