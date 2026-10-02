@@ -491,6 +491,8 @@ def parse_ed2k_link(
 
     context_value = re.sub(r"^\s*[📺🎥🎬👤🗂🍿🎞️]+\s*", "", context or "")
     context_title, context_year = parse_title_year(context_value) if context else ("", None)
+    context_marker = re.match(r"^\s*([📺🎥🎬👤🗂])", context or "")
+    resource_kind = "person" if context_marker and context_marker.group(1) == "👤" else "series" if context_marker and context_marker.group(1) == "🗂" else "media"
     if context_title and context_title != "未命名" and not context_title.lower().startswith("链接"):
         title = context_title
         year = year or context_year
@@ -516,7 +518,8 @@ def parse_ed2k_link(
         hdr=" + ".join(hdr_tags) if hdr_tags else None,
         audio=audio_match.group(1) if audio_match else None,
         release_group=release_group_match.group(1) if release_group_match else None,
-        metadata={"context": context} if context else {},
+        resource_kind=resource_kind,
+        metadata={"context": context, "resource_kind": resource_kind} if context else {},
     )
 
 

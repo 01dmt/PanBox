@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 
 RESOURCE_PAGE_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
-RESOURCE_PAGE_HOSTS = {"telegra.ph"}
+RESOURCE_PAGE_HOSTS = {"telegra.ph", "files.catbox.moe"}
 MAX_PAGE_BYTES = 512 * 1024
 FETCH_TIMEOUT = 8
 
@@ -23,7 +23,8 @@ def _is_supported_page(url: str) -> bool:
         parsed = urlsplit(url)
     except ValueError:
         return False
-    return parsed.scheme.lower() == "https" and parsed.hostname and parsed.hostname.lower().removeprefix("www.") in RESOURCE_PAGE_HOSTS and bool(parsed.path)
+    host = parsed.hostname.lower().removeprefix("www.") if parsed.hostname else ""
+    return parsed.scheme.lower() == "https" and host in RESOURCE_PAGE_HOSTS and bool(parsed.path)
 
 
 class _TelegraphParser(HTMLParser):
@@ -48,7 +49,7 @@ class _TelegraphParser(HTMLParser):
         if tag == "a":
             attributes = dict(attrs)
             href = attributes.get("href")
-            if href and _is_supported_source(href):
+            if href and (_is_supported_source(href) or _is_supported_page(href)):
                 self.hrefs.append(href)
         if tag == "meta":
             attributes = dict(attrs)
@@ -116,15 +117,31 @@ def expand_resource_pages(text: str) -> str:
         return text
 
     sections = [text]
-    for url in urls:
+    queue = list(urls)
+    while queue:
+        url = queue.pop(0)
         try:
             title, page_text = fetch_resource_page(url)
         except Exception:
             continue
+        nested = []
+        for match in RESOURCE_PAGE_RE.finditer(page_text):
+            nested_url = _clean_url(match.group(0))
+            if _is_supported_page(nested_url) and nested_url not in seen:
+                seen.add(nested_url)
+                nested.append(nested_url)
         source_lines = [line for line in page_text.splitlines() if _is_supported_source(line)]
-        if not source_lines:
+        queue.extend(nested)
+        if not source_lines and not nested:
             continue
-        heading = f"📺 {title}\n" if title else ""
+        page_host = urlsplit(url).hostname.lower().removeprefix("www.")
+        if not title:
+            before = text[: text.find(url)]
+            heading_match = re.findall(r"(?m)^\s*([📺🎥🎬👤🗂].+)$", before)
+            title = heading_match[-1].strip() if heading_match else None
+        elif page_host == "telegra.ph":
+            title = f"📺 {title}"
+        heading = f"{title}\n" if title else ""
         source_text = "\n".join(source_lines)
         sections.append(f"{heading}{source_text}")
     return "\n".join(sections)
