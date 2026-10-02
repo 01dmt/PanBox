@@ -1,4 +1,4 @@
-import { Archive, ChevronRight, Database, FileText, UserRound } from "lucide-react";
+import { Archive, ChevronRight, Database, FileText, UserRound, X, ExternalLink } from "lucide-react";
 import { displayResourceKind, displayStatus, formatBytes, formatNumber } from "../lib/format";
 
 function kindIcon(kind) {
@@ -32,4 +32,17 @@ export default function ResourceLibrary({ items, loading, selectedId, onSelect, 
     })}</div> : null}
     {pages > 1 ? <footer className="resource-library-footer"><button type="button" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>上一页</button><span>第 {page} / {pages} 页</span><button type="button" disabled={page >= pages} onClick={() => onPageChange(page + 1)}>下一页</button></footer> : null}
   </section>;
+}
+
+export function ResourceDetail({ item, loading, onClose }) {
+  if (loading || !item) return <aside className="resource-detail"><span>正在加载资源详情…</span></aside>;
+  const metadata = item.resource_metadata_json ? (() => { try { return JSON.parse(item.resource_metadata_json); } catch { return {}; } })() : {};
+  const fields = metadata.channel_fields || {};
+  return <aside className="resource-detail">
+    <header><div><small>资源条目</small><h2>{item.tmdb_title || item.title || "未命名资源"}</h2></div><button type="button" className="icon-only" onClick={onClose} aria-label="关闭详情"><X size={18} /></button></header>
+    <div className="resource-detail-summary"><span>{displayResourceKind(item.resource_kind)}</span><span>{item.year || "年份未知"}</span><span>{item.source_count || 0} 个来源</span></div>
+    <section><h3>刮削字段</h3>{Object.entries(fields).length ? <dl>{Object.entries(fields).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd></div>)}</dl> : <p className="muted">暂无结构化字段，可根据原始消息手动补充。</p>}</section>
+    <section><h3>来源</h3><div className="resource-detail-sources">{(item.sources || []).map((source) => <div key={source.id}><strong>{source.provider || source.source_type}</strong><span>{source.raw_label || source.filename || "来源链接"}</span><a href={source.url} target="_blank" rel="noreferrer"><ExternalLink size={14} /></a></div>)}</div></section>
+    <section><h3>原始消息</h3>{(item.original_messages || []).length ? item.original_messages.map((message) => <article className="resource-raw-message" key={message.id}><div><strong>{message.channel_name || "未知频道"}</strong><small>{message.message_url || message.event_id}</small></div><pre>{message.raw_text || ""}</pre></article>) : <p className="muted">没有关联的原始入库消息。</p>}</section>
+  </aside>;
 }

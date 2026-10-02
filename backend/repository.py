@@ -674,6 +674,19 @@ def get_media(media_id: int, db_path: str | Path | None = None) -> dict[str, Any
         imdb_lookup = connection.execute(
             "SELECT evidence_json FROM imdb_lookups WHERE media_id = ?", (media_id,)
         ).fetchone()
+        messages = connection.execute(
+            """
+            SELECT DISTINCT e.id, e.event_id, e.service, e.channel_name, e.channel_username,
+                   e.message_id, e.message_url, e.channel_avatar_url, e.published_at,
+                   e.raw_text, e.raw_json, e.status, e.received_at
+            FROM ingestion_events e
+            JOIN ingestion_links l ON l.ingestion_id = e.id
+            JOIN source_records s ON s.source_key = l.source_key
+            WHERE s.media_id = ?
+            ORDER BY e.received_at DESC
+            """,
+            (media_id,),
+        ).fetchall()
 
     result = dict(item)
     result["sources"] = [
@@ -682,6 +695,7 @@ def get_media(media_id: int, db_path: str | Path | None = None) -> dict[str, Any
     ]
     result["candidates"] = [dict(row) for row in candidates]
     result["imdb_lookup"] = json.loads(imdb_lookup["evidence_json"]) if imdb_lookup else None
+    result["original_messages"] = [dict(row) for row in messages]
     return result
 
 
