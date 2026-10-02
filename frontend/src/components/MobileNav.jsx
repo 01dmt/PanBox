@@ -1,12 +1,10 @@
-import { CircleHelp, FolderInput, LayoutDashboard, Library, Settings } from "lucide-react";
-import { formatNumber } from "../lib/format";
+import { FolderInput, LayoutDashboard, Library, Settings } from "lucide-react";
 
 
 const ITEMS = [
   { id: "dashboard", label: "仪表盘", icon: LayoutDashboard },
   { id: "library", label: "影视库", icon: Library },
   { id: "resources", label: "资源库", icon: FolderInput },
-  { id: "pending", label: "待匹配", icon: CircleHelp },
   { id: "imports", label: "入库", icon: FolderInput },
   { id: "settings", label: "设置", icon: Settings },
 ];
@@ -22,7 +20,7 @@ export default function MobileNav({ view, onChange, pending, config }) {
         const Icon = item.icon;
         return (
           <button type="button" key={item.id} className={view === item.id ? "active" : ""} onClick={() => onChange(item.id)}>
-            <span><Icon size={20} />{item.id === "pending" && pending ? <small>{formatNumber(Math.min(pending, 999))}</small> : null}</span>
+            <span><Icon size={20} /></span>
             {item.label}
           </button>
         );

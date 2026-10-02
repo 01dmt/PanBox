@@ -374,7 +374,7 @@ export default function App() {
         ) : DATA_VIEWS.has(view) ? (
           <>
             <StatsBar stats={stats} activeView={view} />
-            {view === "resources" ? <div className="resource-library-layout"><ResourceLibrary items={pageData.items} loading={loading} selectedId={selectedId} onSelect={selectItem} total={pageData.total} page={pageData.page} pages={pageData.pages} onPageChange={(page) => changeFilters({ page })} /><ResourceDetail item={selectedItem} loading={detailLoading} onClose={() => setSelectedId(null)} /></div> : null}
+            {view === "resources" ? <><FilterToolbar view={view} filters={filters} options={filterOptions} search={search} loading={loading} total={pageData.total} onChange={changeFilters} onReset={clearFilters} onClearSearch={() => { setSearch(""); changeFilters({}); }} onRefresh={() => loadMedia()} /><div className="resource-library-layout"><ResourceLibrary items={pageData.items} loading={loading} selectedId={selectedId} onSelect={selectItem} total={pageData.total} page={pageData.page} pages={pageData.pages} onPageChange={(page) => changeFilters({ page })} /><ResourceDetail item={selectedItem} loading={detailLoading} onClose={() => setSelectedId(null)} /></div></> : null}
             <div className={`workspace-grid ${view === "resources" ? "resource-workspace-hidden" : ""}`}>
               <main className={`library-panel ${view === "resources" ? "resource-library-hidden" : ""}`}>
                 <FilterToolbar

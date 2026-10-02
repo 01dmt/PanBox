@@ -16,7 +16,6 @@ const NAV_ITEMS = [
   { id: "dashboard", label: "仪表盘", icon: LayoutDashboard },
   { id: "library", label: "影视库", icon: Library },
   { id: "resources", label: "资源库", icon: Layers3 },
-  { id: "pending", label: "待匹配", icon: CircleHelp, countKey: "pending" },
   { id: "duplicates", label: "多来源", icon: Layers3, countKey: "multi" },
   { id: "imports", label: "入库记录", icon: FileClock },
   { id: "settings", label: "设置", icon: Settings },
