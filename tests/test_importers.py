@@ -103,6 +103,13 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(source.metadata["media_info"], "4K WEB-DL DDP 5 1")
         self.assertEqual(source.raw_label, "余红旧事")
 
+    def test_inferrs_tv_from_episode_range_without_marker(self) -> None:
+        source = parse_share_line(
+            "🔗 https://115cdn.com/s/example?password=x",
+            context="死有对证（2026）\n📁 收录版本：E01-E15（双版本均带国语）",
+        )
+        self.assertEqual((source.title, source.year, source.media_type), ("死有对证", 2026, "tv"))
+
     def test_classifies_person_and_series_resource_headings(self) -> None:
         person = parse_share_line("🔗 https://115cdn.com/s/person?password=x", context="👤 陈百强\n🎂 生日：1958-09-07\n🏠 出生地：British Hong Kong\n📚 代表作：秋天的童话")
         series = parse_share_line("🔗 https://115cdn.com/s/series?password=x", context="🗂 角头（系列）\n📀 包含影片：角头、角头2")

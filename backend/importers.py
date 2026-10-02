@@ -155,7 +155,7 @@ def parse_title_year(value: str) -> tuple[str, Optional[int]]:
 
 def infer_share_media_type(title: str, extra: str) -> str:
     haystack = f"{title} {extra}"
-    if re.search(r"(?i)S\d{1,2}(?:E\d{1,3})?", haystack):
+    if re.search(r"(?i)S\d{1,2}(?:E\d{1,3})?", haystack) or re.search(r"(?i)\bE\d{1,3}\s*[-~]\s*E\d{1,3}\b", haystack):
         return "tv"
     if re.search(r"全\s*\d+\s*集|第\s*\d+\s*季|剧集|电视剧|综艺|连续剧", haystack):
         return "tv"
