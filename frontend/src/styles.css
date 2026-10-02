@@ -2496,3 +2496,4 @@ select:focus-visible {
 .telegram-channel-avatar { display:grid; place-items:center; width:24px; height:24px; flex:0 0 24px; overflow:hidden; color:#fff; background:#229ed9; border-radius:50%; }
 .telegram-channel-avatar img { width:24px; height:24px; border-radius:50%; }
 .telegram-channel-fallback { display:grid; place-items:center; }
+.telegram-channel-fallback.has-image { display:none; }

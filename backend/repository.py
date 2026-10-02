@@ -9,6 +9,7 @@ from typing import Any, Iterable, Optional
 
 from .importers import ParsedSource, content_digest, detect_source_kind, iter_sources, normalize_title
 from .schema import connect, init_db
+from .telegram_avatar import cache_channel_avatar, normalize_channel_username
 
 
 def utc_now() -> str:
@@ -814,6 +815,9 @@ def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) 
     items = []
     for event in events:
         item = dict(event)
+        username = normalize_channel_username(item.get("channel_username"))
+        if username and cache_channel_avatar(username):
+            item["channel_avatar_url"] = f"/api/channel-avatar/{username}"
         item["media_ids"] = json.loads(item.pop("media_ids_json") or "[]")
         item["source_channel"] = item.get("channel_name") or item.get("channel_id") or "未知频道"
         item["source_username"] = item.get("channel_username")

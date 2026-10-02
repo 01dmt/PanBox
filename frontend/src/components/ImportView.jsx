@@ -98,7 +98,7 @@ export default function ImportView({ onImported, manualOpen, onCloseManual }) {
           {records.map((item) => (
             <button className="history-row history-row-button" type="button" key={item.id} onClick={() => openRecord(item)} aria-label={`查看 ${item.source_channel} 的消息明细`}>
               <span className="ingestion-channel">
-                <span className="telegram-channel-avatar">{item.channel_avatar_url ? <img src={item.channel_avatar_url} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling.style.display = "grid"; }} /> : null}<span className="telegram-channel-fallback"><Send size={16} fill="currentColor" /></span></span>
+                <span className="telegram-channel-avatar">{item.channel_avatar_url ? <img src={item.channel_avatar_url} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.nextElementSibling.style.display = "grid"; }} /> : null}<span className={`telegram-channel-fallback ${item.channel_avatar_url ? "has-image" : ""}`}><Send size={16} fill="currentColor" /></span></span>
                 <strong>{item.source_channel}</strong>
               </span>
               <span><TelegramIcon size={15} />{SOURCE_LABELS[item.source_service] || item.source_service}</span>
