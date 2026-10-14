@@ -49,11 +49,12 @@ function SourceRow({ source, readOnly = false }) {
   const seasonLabel = seasonStart != null
     ? `S${String(seasonStart).padStart(2, "0")}${seasonEnd > seasonStart ? `-S${String(seasonEnd).padStart(2, "0")}` : ""}`
     : "";
+  const isCloudShare = ["115", "123", "guangya"].includes(source.source_type);
 
   return (
     <div className="source-row">
       <span className={`source-icon source-${source.source_type}`}>
-        {source.source_type === "115" ? <Link2 size={16} /> : <FileVideo2 size={16} />}
+        {isCloudShare ? <Link2 size={16} /> : <FileVideo2 size={16} />}
       </span>
       <div>
         <strong>{source.filename || source.raw_label}</strong>
@@ -62,13 +63,13 @@ function SourceRow({ source, readOnly = false }) {
           {source.file_size ? ` · ${formatBytes(source.file_size)}` : ""}
           {source.season != null ? ` · ${seasonLabel}${source.episode != null ? `E${String(source.episode).padStart(2, "0")}` : " · 整季"}` : ""}
         </span>
-        <small>{source.source_type === "115" ? maskedSource(source.url) : source.ed2k_hash}</small>
+        <small>{isCloudShare ? maskedSource(source.url) : source.ed2k_hash}</small>
         {searchNames.length ? <small className="source-match-hint">内容：{searchNames.slice(0, 2).join(" · ")}</small> : null}
         {snapshot?.status === "unavailable" ? <small className="source-unavailable">分享内容不可访问</small> : null}
       </div>
       {!readOnly && <div className="source-actions">
-      {source.source_type === "115" ? (
-        <button type="button" className="icon-only" onClick={() => window.open(source.url, "_blank", "noopener,noreferrer")} title="打开 115 链接">
+      {isCloudShare ? (
+        <button type="button" className="icon-only" onClick={() => window.open(source.url, "_blank", "noopener,noreferrer")} title={`打开 ${source.provider || source.source_type} 链接`}>
           <ExternalLink size={15} />
         </button>
       ) : (

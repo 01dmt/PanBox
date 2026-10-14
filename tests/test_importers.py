@@ -103,6 +103,53 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(source.metadata["media_info"], "4K WEB-DL DDP 5 1")
         self.assertEqual(source.raw_label, "余红旧事")
 
+    def test_parses_123_share_with_channel_heading(self) -> None:
+        content = (
+            "📺 剧集：兰香如故 (2026) S01E40\n"
+            "📝 简介：一段简介\n"
+            "🗂 分类：剧集/国产剧集\n"
+            "🎞 版本：2160p TX.WEB-DL H.265 DDP 5.1\n"
+            "🔗 链接：点击保存到123云盘 https://www.123865.com/s/Oqtgvd-XY9hh?pwd=YSRG\n"
+        )
+        source = next(iter_share_sources(content))
+        self.assertEqual(
+            (source.title, source.year, source.media_type, source.season, source.episode),
+            ("兰香如故", 2026, "tv", 1, 40),
+        )
+        self.assertEqual((source.source_type, source.provider), ("123", "123"))
+        self.assertEqual(source.source_key, "123:https://www.123865.com/s/Oqtgvd-XY9hh?pwd=YSRG")
+
+    def test_parses_guangya_share_and_adjacent_password(self) -> None:
+        source = next(iter_share_sources(
+            "电影 (2024)\n访问码：abcd\n🔗 https://www.guangyapan.com/s/example"
+        ))
+        self.assertEqual((source.source_type, source.provider), ("guangya", "guangya"))
+        self.assertEqual(source.url, "https://www.guangyapan.com/s/example?password=abcd")
+        self.assertEqual(source.source_key, "guangya:https://www.guangyapan.com/s/example?password=abcd")
+
+        source = next(iter_share_sources(
+            "电影 (2024)\n🔗 https://www.guangyapan.com/s/next\n提取码：efgh"
+        ))
+        self.assertEqual(source.url, "https://www.guangyapan.com/s/next?password=efgh")
+
+    def test_guangya_source_is_included_in_stats_and_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "media.db"
+            import_content("电影 (2024) https://guangyapan.com/s/example?pwd=abcd", "guangya.txt", db_path=db_path)
+            self.assertEqual(get_stats(db_path)["sources"]["share_guangya"], 1)
+            self.assertEqual(list_media(source_type="guangya", db_path=db_path)["total"], 1)
+
+    def test_attaches_access_code_from_adjacent_forwarded_line(self) -> None:
+        source = next(iter_share_sources(
+            "电影 (2024)\n访问码：abcd\n🔗 https://115.com/s/example"
+        ))
+        self.assertEqual(source.url, "https://115.com/s/example?password=abcd")
+
+        source = next(iter_share_sources(
+            "电影 (2024)\n密码：YSRG\n🔗 https://123865.com/s/Oqtgvd-XY9hh"
+        ))
+        self.assertEqual(source.url, "https://123865.com/s/Oqtgvd-XY9hh?pwd=YSRG")
+
     def test_inferrs_tv_from_episode_range_without_marker(self) -> None:
         source = parse_share_line(
             "🔗 https://115cdn.com/s/example?password=x",

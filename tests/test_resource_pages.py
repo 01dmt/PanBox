@@ -39,6 +39,15 @@ class ResourcePageTests(unittest.TestCase):
         self.assertIn("📺 陈百强", expanded)
         self.assertIn("ed2k://|file|x.zip", expanded)
 
+    def test_can_inherit_a_channel_person_heading(self) -> None:
+        html = "<html><head><meta property='og:title' content='本田瞳'></head><body>ed2k://|file|x.zip|20|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/</body></html>".encode()
+        message = "👤 本田瞳\n📎 查看资源 https://telegra.ph/hitomi-08-04"
+        with patch("backend.resource_pages.urlopen", return_value=_Response(html)):
+            expanded = expand_resource_pages(message, inherited_heading="👤 本田瞳")
+
+        self.assertIn("👤 本田瞳\ned2k://|file|x.zip", expanded)
+        self.assertNotIn("📺 本田瞳\ned2k://|file|x.zip", expanded)
+
 
 if __name__ == "__main__":
     unittest.main()

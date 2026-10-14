@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Settings,
 } from "lucide-react";
+import { Fragment } from "react";
 import { formatBytes, formatNumber } from "../lib/format";
 
 
@@ -22,11 +23,15 @@ const NAV_ITEMS = [
 ];
 
 
-export default function Sidebar({ view, onChange, stats, config }) {
+export default function Sidebar({ view, onChange, stats, config, providerOptions = [] }) {
   const counts = {
     pending: stats?.media?.pending ?? 0,
     multi: stats?.multi_source ?? 0,
   };
+  const providerCounts = new Map((stats?.sources?.providers || []).map((provider) => [provider.id, provider.count]));
+  const providers = providerOptions.length
+    ? providerOptions.map((provider) => ({ ...provider, count: providerCounts.get(provider.id) || 0 }))
+    : (stats?.sources?.providers || []);
 
   return (
     <aside className="sidebar">
@@ -62,8 +67,7 @@ export default function Sidebar({ view, onChange, stats, config }) {
         <strong>{formatNumber(stats?.media?.total)} 部作品</strong>
         <span>{formatNumber(stats?.sources?.total)} 条来源</span>
         <div className="summary-grid">
-          <span>115</span><b>{formatNumber(stats?.sources?.share_115)}</b>
-          <span>ED2K</span><b>{formatNumber(stats?.sources?.ed2k)}</b>
+          {providers.map((provider) => <Fragment key={provider.id}><span>{provider.label || provider.id}</span><b>{formatNumber(provider.count)}</b></Fragment>)}
           <span>文件体积</span><b>{formatBytes(stats?.sources?.bytes)}</b>
         </div>
       </div>

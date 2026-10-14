@@ -42,6 +42,7 @@ LINK_RE = re.compile(r"^/api/media/(\d+)/tmdb/link$")
 UNLINK_RE = re.compile(r"^/api/media/(\d+)/tmdb/unlink$")
 PUBLIC_RESOURCES_RE = re.compile(r"^/api/media/tmdb/(\d+)/resources$")
 INGESTION_RECORD_RE = re.compile(r"^/api/ingestion/records/([A-Za-z0-9_-]+)$")
+INGESTION_RECORD_RETRY_RE = re.compile(r"^/api/ingestion/records/([A-Za-z0-9_-]+)/retry$")
 
 
 class MediaRequestHandler(BaseHTTPRequestHandler):
@@ -163,7 +164,16 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
                 self._json({"items": list_imports(int(_first(query, "limit", "50")), self.db_path)})
                 return
             if path == "/api/ingestion/records":
-                self._json(list_ingestion_records(int(_first(query, "limit", "100")), self.db_path))
+                self._json(list_ingestion_records(
+                    int(_first(query, "limit", "100")), self.db_path,
+                    _first(query, "status", "") or None, _first(query, "q", "") or None,
+                ))
+                return
+            if match := INGESTION_RECORD_RETRY_RE.match(path):
+                try:
+                    self._json(ingestion.retry_ingestion_event(match.group(1), self.db_path))
+                except ValueError as exc:
+                    self._error(str(exc), HTTPStatus.NOT_FOUND)
                 return
             if match := INGESTION_RECORD_RE.match(path):
                 event = ingestion.get_event(match.group(1), self.db_path)
@@ -174,6 +184,9 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/ingestion/reprocess":
                 self._json(ingestion.reprocess_ignored(int(body.get("limit") or 100), self.db_path))
+                return
+            if path == "/api/ingestion/retry-failed":
+                self._json(ingestion.retry_failed_ingestions(int(body.get("limit") or 100), self.db_path))
                 return
             if path == "/api/media/filters":
                 self._json(get_media_filters(self.db_path))
@@ -266,7 +279,6 @@ class MediaRequestHandler(BaseHTTPRequestHandler):
                 result = search_media(
                     media_id,
                     auto_link=bool(body.get("auto_link", False)),
-                    refresh_share=bool(body.get("refresh_share", False)),
                     db_path=self.db_path,
                 )
                 result["item"] = get_media(result.get("media_id", media_id), self.db_path)
@@ -433,6 +445,7 @@ def serve(
     static_dir: str | Path | None = None,
 ) -> None:
     resolved_db = init_db(db_path)
+    ingestion.start_validation_worker(resolved_db)
     cleanup = cleanup_cancelled_shares(resolved_db)
     if cleanup["removed"]:
         print(f"已清理 {cleanup['removed']} 条已取消分享、{cleanup['media_removed']} 条无来源待处理记录。")

@@ -14,6 +14,10 @@ DEFAULT_DB_PATH = ROOT_DIR / "data" / "media.db"
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS media_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -95,6 +99,9 @@ CREATE TABLE IF NOT EXISTS ingestion_links (
     status TEXT NOT NULL DEFAULT 'extracted',
     media_id INTEGER REFERENCES media_items(id) ON DELETE SET NULL,
     error TEXT,
+    validation_attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT,
+    validation_error TEXT,
     UNIQUE(ingestion_id, source_key)
 );
 CREATE INDEX IF NOT EXISTS idx_ingestion_links_source ON ingestion_links(source_key);
@@ -122,6 +129,12 @@ CREATE TABLE IF NOT EXISTS source_records (
     audio TEXT,
     release_group TEXT,
     metadata_json TEXT,
+    resource_class TEXT NOT NULL DEFAULT 'media',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    notes TEXT NOT NULL DEFAULT '',
+    availability_status TEXT NOT NULL DEFAULT 'unknown',
+    last_checked_at TEXT,
+    last_check_error TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -174,6 +187,42 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
     return connection
 
 
+def _migrate_resource_headings(connection: sqlite3.Connection) -> None:
+    """Repair icon-based legacy classification once, preserving later edits."""
+    from .resource_metadata import infer_class, json_object, source_resource_kind
+
+    migration = "resource_heading_kinds_v2"
+    if connection.execute("SELECT 1 FROM schema_migrations WHERE name=?", (migration,)).fetchone():
+        return
+    sources_by_media = {}
+    for row in connection.execute("""
+        SELECT s.id, s.media_id, s.resource_class, s.raw_label, s.metadata_json,
+               m.media_type, m.resource_kind AS media_kind
+        FROM source_records s JOIN media_items m ON m.id=s.media_id
+    """).fetchall():
+        kind = source_resource_kind(row["metadata_json"])
+        context = str(json_object(row["metadata_json"]).get("context") or "")
+        # The old LIKE '%🗂%' / LIKE '%👤%' test matched metadata and prose
+        # anywhere in the message, even after an ordinary movie/TV heading.
+        misleading_icon = kind == "media" and any(icon in context for icon in ("👤", "🗂"))
+        sources_by_media.setdefault(row["media_id"], []).append((row, kind, misleading_icon))
+        if misleading_icon and row["resource_class"] in {"person", "collection"}:
+            connection.execute("UPDATE source_records SET resource_class=? WHERE id=?",
+                               (infer_class("media", row["raw_label"], row["media_type"]), row["id"]))
+
+    for media_id, sources in sources_by_media.items():
+        current = sources[0][0]["media_kind"]
+        kinds = {kind for _, kind, _ in sources if kind}
+        # Preserve real profiles/collections, including legacy heading-only
+        # metadata. A missing context is not proof of a misclassification.
+        expected = next((kind for kind in ("person", "series") if kind in kinds), None)
+        if expected is None and any(misleading for _, _, misleading in sources):
+            expected = "media"
+        if expected and current != expected:
+            connection.execute("UPDATE media_items SET resource_kind=? WHERE id=?", (expected, media_id))
+    connection.execute("INSERT INTO schema_migrations(name) VALUES (?)", (migration,))
+
+
 def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
     path = resolve_db_path(db_path)
     with connect(path) as connection:
@@ -184,20 +233,37 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
             connection.execute("ALTER TABLE source_records ADD COLUMN provider TEXT NOT NULL DEFAULT '115'")
         if "season_end" not in columns:
             connection.execute("ALTER TABLE source_records ADD COLUMN season_end INTEGER")
+        for name, definition in (
+            ("resource_class", "TEXT NOT NULL DEFAULT 'media'"),
+            ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("notes", "TEXT NOT NULL DEFAULT ''"),
+            ("availability_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("last_checked_at", "TEXT"),
+            ("last_check_error", "TEXT"),
+        ):
+            if name not in columns:
+                connection.execute(f"ALTER TABLE source_records ADD COLUMN {name} {definition}")
         media_columns = {row["name"] for row in connection.execute("PRAGMA table_info(media_items)")}
         if "resource_kind" not in media_columns:
             connection.execute("ALTER TABLE media_items ADD COLUMN resource_kind TEXT NOT NULL DEFAULT 'media'")
         if "resource_metadata_json" not in media_columns:
             connection.execute("ALTER TABLE media_items ADD COLUMN resource_metadata_json TEXT NOT NULL DEFAULT '{}'")
-        connection.execute("""
-            UPDATE media_items
-            SET resource_kind = CASE
-                WHEN EXISTS (SELECT 1 FROM source_records s WHERE s.media_id = media_items.id AND json_extract(s.metadata_json, '$.context') LIKE '%👤%') THEN 'person'
-                WHEN EXISTS (SELECT 1 FROM source_records s WHERE s.media_id = media_items.id AND json_extract(s.metadata_json, '$.context') LIKE '%🗂%') THEN 'series'
-                ELSE resource_kind END
-            WHERE resource_kind = 'media'
-        """)
+        _migrate_resource_headings(connection)
+        # Backfill only when introducing the source management fields. Never overwrite user edits.
+        if "resource_class" not in columns:
+            from .resource_metadata import infer_class, snapshot_state, source_resource_kind
+            for row in connection.execute("SELECT s.id,s.raw_label,s.metadata_json,m.resource_kind,m.media_type FROM source_records s JOIN media_items m ON m.id=s.media_id").fetchall():
+                state, checked_at = snapshot_state(row["metadata_json"])
+                connection.execute("UPDATE source_records SET resource_class=?, availability_status=?, last_checked_at=? WHERE id=?",
+                                   (infer_class(source_resource_kind(row["metadata_json"]) or row["resource_kind"], row["raw_label"], row["media_type"]), state, checked_at, row["id"]))
+            connection.execute("""UPDATE source_records SET availability_status='available',
+                last_checked_at=(SELECT MAX(e.processed_at) FROM ingestion_links l JOIN ingestion_events e ON e.id=l.ingestion_id
+                                 WHERE l.source_key=source_records.source_key AND l.status IN ('inserted','duplicate'))
+                WHERE source_type != 'ed2k' AND availability_status='unknown'
+                AND EXISTS (SELECT 1 FROM ingestion_links l WHERE l.source_key=source_records.source_key AND l.status IN ('inserted','duplicate'))""")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_provider ON source_records(provider)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_resource_class ON source_records(resource_class)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_availability ON source_records(availability_status)")
         ingestion_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ingestion_events)")}
         for name, definition in (
             ("channel_username", "TEXT"),
@@ -206,6 +272,15 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
         ):
             if name not in ingestion_columns:
                 connection.execute(f"ALTER TABLE ingestion_events ADD COLUMN {name} {definition}")
+        link_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ingestion_links)")}
+        for name, definition in (
+            ("validation_attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("next_retry_at", "TEXT"),
+            ("validation_error", "TEXT"),
+        ):
+            if name not in link_columns:
+                connection.execute(f"ALTER TABLE ingestion_links ADD COLUMN {name} {definition}")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ingestion_links_validation ON ingestion_links(status, next_retry_at)")
         table_sql = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='source_records'").fetchone()[0] or ""
         if "source_type IN ('115', 'ed2k')" in table_sql:
             connection.execute("PRAGMA foreign_keys = OFF")

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import unittest
+import io
 import json
 import sqlite3
 import tempfile
 from pathlib import Path
+from unittest.mock import Mock, patch
 
-from backend.share115 import Share115Client, derive_search_names, infer_media_type, parse_share_url, inspect_resource, enrich_media_share_sources
+from backend.share115 import Share115Client, Share115Error, ShareRequestGate, derive_search_names, infer_media_type, parse_share_url, inspect_resource, enrich_media_share_sources
 from backend.repository import import_content, list_media, get_media
-from backend.tmdb import collect_search_context
+from backend.tmdb import collect_search_context, search_media
 
 
 class FakeShare115Client(Share115Client):
@@ -137,7 +139,9 @@ class Share115Tests(unittest.TestCase):
         names = ["电影合集", "First.Movie.2020.mkv", "Second.Movie.2021.mkv"]
         self.assertEqual(derive_search_names(["电影合集"], names), ["电影合集"])
 
-    def test_cached_snapshot_names_become_tmdb_search_terms(self) -> None:
+    def test_cached_snapshot_names_are_no_longer_search_terms(self) -> None:
+        # Directory snapshots are neither fetched nor trusted any more:
+        # recognition uses only what the ingested message provided.
         context = collect_search_context(
             {
                 "title": "精英之王",
@@ -155,12 +159,69 @@ class Share115Tests(unittest.TestCase):
                 ],
             }
         )
-        self.assertIn("Big Bet", context.titles)
+        self.assertNotIn("Big Bet", context.titles)
+        self.assertEqual(context.titles, ["精英之王"])
         self.assertIn(2022, context.years)
+
+    def test_recognition_never_fetches_115_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "media.db"
+            import_content("Film (2024) https://115.com/s/a", "t", db_path=db)
+            mid = list_media(db_path=db)["items"][0]["id"]
+            client = Mock()
+            client.search.return_value = []
+            client.imdb_fallback.return_value = {"candidates": [], "evidence": None}
+            with patch("backend.share115.Share115Client.fetch_snapshot") as fetch:
+                search_media(mid, auto_link=True, db_path=db, client=client)
+            fetch.assert_not_called()
 
     def test_season_marker_infers_tv(self) -> None:
         self.assertEqual(infer_media_type(["KPOPPED.S01E01.2160p.mkv"]), "tv")
         self.assertIsNone(infer_media_type(["Blitz.2024.2160p.mkv"]))
+
+
+class Share115ErrorClassificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.gate_path = Path(self.directory.name) / "gate.json"
+
+    def probe_with(self, payload: bytes):
+        gate = ShareRequestGate(self.gate_path)
+        with patch("backend.share115.urlopen", return_value=io.BytesIO(payload)):
+            with self.assertRaises(Share115Error) as error:
+                Share115Client(gate=gate).probe_share("https://115.com/s/example?password=abcd")
+        return error.exception
+
+    def gate_paused(self) -> bool:
+        return bool(json.loads(self.gate_path.read_text()).get("paused", False))
+
+    def test_password_message_is_terminal_even_with_verification_wording(self) -> None:
+        for message in ("密码错误", "密码验证失败", "提取码验证错误"):
+            error = self.probe_with(json.dumps({"state": False, "errno": 990002, "error": message}).encode())
+            self.assertTrue(error.terminal, message)
+            self.assertFalse(error.risk_control, message)
+            self.assertFalse(self.gate_paused(), message)
+            self.gate_path.unlink(missing_ok=True)
+
+    def test_dead_share_message_is_terminal_without_business_code(self) -> None:
+        error = self.probe_with(json.dumps({"state": False, "errno": None, "error": "该分享已失效"}).encode())
+        self.assertTrue(error.terminal)
+        self.assertFalse(error.risk_control)
+        self.assertFalse(self.gate_paused())
+
+    def test_captcha_and_rate_wording_still_pause_the_gate(self) -> None:
+        for message in ("请完成验证", "操作过于频繁", "触发风控，请输入验证码"):
+            error = self.probe_with(json.dumps({"state": False, "errno": 990002, "error": message}).encode())
+            self.assertTrue(error.risk_control, message)
+            self.assertFalse(error.terminal, message)
+            self.assertTrue(self.gate_paused(), message)
+            self.gate_path.unlink(missing_ok=True)
+
+    def test_unknown_error_without_business_message_stays_retryable_risk(self) -> None:
+        error = self.probe_with(json.dumps({"state": False, "errno": 911, "error": "unknown"}).encode())
+        self.assertTrue(error.risk_control)
+        self.assertFalse(error.terminal)
 
 
 if __name__ == "__main__":

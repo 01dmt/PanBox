@@ -2,7 +2,7 @@
 
 本文描述当前 FastAPI 实现，供其他项目转发原始影视资源消息使用。外部项目不需要提前解析标题、网盘链接或 TMDB ID。
 
-> 重要：当前版本完成原始消息保存、115/ED2K 文本提取、资源导入及后台 TMDB 匹配。`imported` 表示来源已写入；TMDB 匹配在同一个后台处理流程中继续执行，结果以媒体记录的 `tmdb_status` 为准。它不代表链接存活性验证已完成。请同时阅读文末“当前实现边界”。
+> 重要：当前版本完成原始消息保存、115/123/光鸭/ED2K 文本提取、115/123/光鸭分享校验、资源导入及后台 TMDB 匹配。`imported` 表示至少一条已校验来源已写入；`pending_validation` 表示暂时无法确认的来源已进入持久重试队列。请同时阅读文末“当前实现边界”。
 
 ## 1. 地址与端口
 
@@ -150,6 +150,7 @@ Content-Type: application/json
 
 ```json
 {
+  "accepted": true,
   "id": "ing_0123456789abcdef0123456789abcdef",
   "event_id": "telegram:-1001234567890:456",
   "status": "queued",
@@ -157,7 +158,8 @@ Content-Type: application/json
 }
 ```
 
-- `id` 是 PanBox 的接收记录 ID，保存它以便查询结果。
+- `accepted: true` 表示 PanBox 已接收并持久化原始消息；发送方无需等待后续识别或入库结果。
+- `id` 是 PanBox 的接收记录 ID，管理端可用它查询处理详情。
 - `202` 表示原文已保存并已启动后台处理，不表示处理已完成。
 - 消息去重键为 **`source.service + event_id`**，不是单独的 `source.message_id`。
 - 同一个 Telegram 频道的消息 ID 可能与其他频道重复，建议 `event_id` 包含频道 ID。
@@ -166,6 +168,7 @@ Content-Type: application/json
 
 ```json
 {
+  "accepted": true,
   "id": "ing_0123456789abcdef0123456789abcdef",
   "event_id": "telegram:-1001234567890:456",
   "status": "imported",
@@ -231,6 +234,7 @@ Authorization: Bearer YOUR_INGESTION_API_KEY
 | `queued` | 接收记录已建立，后台尚未写入终态；处理过程中仍可能保持此值 | 低频轮询 |
 | `imported` | 至少新增了一条资源来源 | 来源已写入；随后会自动执行 TMDB 匹配 |
 | `duplicate` | 没有新增来源，通常为已有资源 | 接收处理结束 |
+| `pending_validation` | 分享暂时无法确认，已按退避时间进入持久重试队列 | 等待后台重试；验证码/风控需人工解除 |
 | `ignored` | 未提取到支持的链接 | 保留原文，核查格式/网盘支持情况 |
 | `failed` | 后台处理出现异常 | 记录接收 ID，由管理端排查 |
 
@@ -240,7 +244,7 @@ Authorization: Bearer YOUR_INGESTION_API_KEY
 
 来源写入后，后台会为本次消息涉及的媒体记录调用 TMDB 搜索。满足高置信度、标题和年份一致且没有资源冲突的候选会自动关联；候选存在歧义时会保存为 `review`，没有结果时为 `not_found`，临时请求失败时为 `error`。这些状态属于媒体记录，不会改变接收事件的 `imported` / `duplicate` 状态。未自动关联的条目可在媒体详情中重新搜索候选并手动确认。
 
-结果中的 `links[].status` 是单条来源状态：`inserted` 表示本次事件新增，`duplicate` 表示来源已存在，`error` 表示该条来源导入异常。事件为 `imported` 时至少有一条来源为 `inserted`；事件为 `failed` 时没有来源成功新增且至少有一条来源处理异常。
+结果中的 `links[].status` 是单条来源状态：`inserted` 表示本次事件新增，`duplicate` 表示来源此前已由**其他**事件入库，`invalid` 表示链接失效或访问码错误，`pending_validation` 表示等待重试，`error` 表示该条来源导入异常或连续多次校验未通过后停止自动重试。事件为 `imported` 时至少有一条来源为 `inserted`；事件为 `failed` 时没有来源成功新增且至少有一条来源处理异常；同一事件被重复处理时不会把自己的来源改判为 `duplicate`。
 
 ## 6. 错误响应
 
@@ -294,9 +298,7 @@ curl --fail-with-body --max-time 15 \
 ```python
 import json
 import os
-import time
 from urllib.error import HTTPError
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 BASE = os.environ["PANBOX_BASE_URL"].rstrip("/")
@@ -337,17 +339,9 @@ def forward_message(channel_id, message_id, text, channel_name=""):
 
 
 receipt = forward_message("example-channel", "smoke-001", "连通性测试，无影视链接")
-print("接收记录：", receipt["id"], receipt["status"])
-
-# 最多等待约 60 秒；生产环境建议将轮询放在自己的任务队列中。
-for _ in range(20):
-    result = call("/api/v1/ingestion/messages/" + quote(receipt["id"], safe=""))
-    if result["status"] != "queued":
-        print("处理完成：", result["status"], "本地作品 ID：", result["media_ids"])
-        break
-    time.sleep(3)
-else:
-    print("处理尚未完成，请保存接收 ID 并稍后核查，不要无限重复提交。")
+if not receipt.get("accepted"):
+    raise RuntimeError("PanBox 未确认接收")
+print("已接收：", receipt["id"])
 ```
 
 ## 9. 发送方的可靠性建议
@@ -356,17 +350,26 @@ else:
 - 超时、连接断开或临时 5xx 时，使用**同一 event_id**指数退避重试，例如 2/5/15/30 秒，设定最大次数。
 - 400/422 修正请求后再发；401/503 修复密钥或配置，不要快速循环重试。
 - 同一个 event_id 可以安全并发重试：服务端使用唯一约束原子去重，只有首次写入会启动后台处理，其余请求返回同一个接收 ID。
-- 收到 202 后低频查询结果（例如每 3～5 秒），不要用反复 POST 代替结果查询。
+- 收到 202 且 `accepted: true` 后即可标记消息已送达；处理详情仅供管理端按需查询。
 - 同一个 event_id 即便已经 failed，也不会重新执行。失败重放目前没有专用接口；排查原因后可用带版本的新 ID，但这不提供跨整个处理流程的 exactly-once 保证。
+
+### 发送方只需判断三类结果
+
+1. **接收成功**：HTTP `202`，响应中 `accepted: true`；保存 `id`，即可标记消息已送达。
+2. **API Key 错误**：HTTP `401`；停止重试并修正接入 Key。
+3. **没有收到接收成功回执**：连接超时、断开或可重试的 `5xx`；使用相同 `event_id` 重试，服务端会按幂等键去重。
+
+请求格式错误、请求体过大或服务端未配置接入 Key 时，接口仍可能返回 `400`、`413`、`422` 或 `503` 以便排查；这些都不表示消息已接收，发送方不应将其标记为成功。
 
 ## 10. 当前实现边界（接入前必读）
 
 1. **没有自动 TMDB 刮削**：接收后台调用现有导入逻辑，将来源写入缓存。TMDB 关联仍由现有管理操作/批量匹配触发。
-2. **消息全文解析仍有限**：当前复用逐行导入器。115 每行只提取第一个分享链接，并主要使用同一行的前缀作为标题；片名在上一行、链接在下一行的消息可以收件，但不能保证正确关联片名。独立行访问码尚不会自动拼入分享 URL。ED2K 支持一行多个链接。无需发送方替 PanBox 识别作品，但必须接受当前版本的解析限制。
-3. **不是持久任务队列**：原文已落库，但处理使用每消息一个 daemon 线程；没有并发上限、自动恢复或持久重试。进程重启可能留下 queued 记录。建议发送方保留原文和接收 ID，低并发接入；大规模推送前需要补齐 worker 调度和恢复机制。
-4. **链接状态按来源导入结果记录**：`ingestion_links.status` 会区分本次新插入的 `inserted`、已存在的 `duplicate` 和单条导入异常的 `error`；事件级 `imported` 仍表示至少有一条来源成功新增。
-5. **暂不支持其他网盘或磁力解析**：目前为 115.com、115cdn.com、ED2K。ED2K 在本项目中 provider 为 115。收到其他消息通常为 ignored。
-6. **原文不等于永久有效资源**：收件、导入成功都不验证分享存活性，不进行转存、离线下载或 TG 抓取。
-7. **当前共用一个接入 Key**：持有该 Key 的客户端可查询其已知 ID 对应的任何接收记录，没有按调用方隔离；只分发给可信项目。
+2. **消息全文解析仍有限**：当前复用逐行导入器。115 每行只提取第一个分享链接，并主要使用同一行的前缀作为标题；片名在上一行、链接在下一行的消息可以收件，但不能保证正确关联片名。独立行中的“访问码/提取码/密码”会在可识别时拼入 115/123/光鸭 URL；其他隐藏实体或非标准写法仍需发送方展开。ED2K 支持一行多个链接。无需发送方替 PanBox 识别作品，但必须接受当前版本的解析限制。
+3. **处理队列边界**：原文和待校验链接状态会持久保存；常规导入仍使用每消息一个 daemon 线程，暂不提供通用任务队列的并发调度保证。进程重启后，待校验链接由启动时的后台 worker 继续。
+4. **链接状态按来源导入结果记录**：`ingestion_links.status` 会区分校验中的 `pending_validation`、确认无效的 `invalid`、本次新插入的 `inserted`、已存在的 `duplicate` 和导入异常或放弃自动重试的 `error`；事件级 `imported` 仍表示至少有一条来源成功新增。
+5. **网盘支持范围**：目前支持 115.com/115cdn.com、123865.com/123pan.com、guangyapan.com 和 ED2K。Webhook 入库前会对 115/123/光鸭分享调用只读公开接口，校验分享存在且访问码可用；光鸭支持 URL query 的 `pwd`/`password`，也支持相邻文本中的“访问码/提取码/密码”；ED2K 保持原有导入路径。收到其他消息通常为 ignored。
+6. **校验失败与重试**：确认失效或密码错误的来源标记为 `invalid`，不会写入资源库但会保留在入库记录中；115 除业务码外，明确的“密码/提取码/失效/过期/不存在/已取消”类业务消息同样按终态处理（即使措辞含“验证”）。网络超时、限流或验证码等暂时性失败标记为 `pending_validation`，按退避时间持久重试（30 秒起、封顶 1 小时），连续约 7 天（168 次）真实尝试仍未通过则转 `error` 停止自动重试，保留记录供人工复核。本地请求闸门（风控暂停）的拒绝不消耗重试次数；风控暂停需要人工解除本地请求闸门后才会继续。
+7. **原文不等于永久有效资源**：入库前校验只代表当次探测成功，115 链接仍由独立的低频巡检负责后续状态确认，不进行转存、离线下载或 TG 抓取。
+8. **当前共用一个接入 Key**：持有该 Key 的客户端可查询其已知 ID 对应的任何接收记录，没有按调用方隔离；只分发给可信项目。
 
 本文不包含真实 API Key 或本地影视缓存。依据：`backend/fastapi_app.py`、`backend/ingestion.py`、`backend/importers.py`。

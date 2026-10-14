@@ -9,6 +9,7 @@ from typing import Any, Iterable, Optional
 
 from .importers import ParsedSource, content_digest, detect_source_kind, iter_sources, normalize_title
 from .schema import connect, init_db
+from .resource_metadata import infer_class
 from .telegram_avatar import cache_channel_avatar, normalize_channel_username
 
 
@@ -68,9 +69,15 @@ def ensure_media(connection: sqlite3.Connection, source: ParsedSource) -> int:
         if media_type == "unknown" and source.media_type != "unknown":
             media_type = source.media_type
         year = existing["year"] if existing["year"] is not None else source.year
+        resource_kind = existing["resource_kind"] if existing["resource_kind"] in {"media", "person", "series"} else "media"
+        # Keep an explicit profile/series identity when a later ordinary
+        # source shares the same title. An explicit profile/series heading can
+        # still promote an unclassified placeholder.
+        if resource_kind == "media" and source.resource_kind in {"person", "series"}:
+            resource_kind = source.resource_kind
         connection.execute(
             "UPDATE media_items SET media_type = ?, resource_kind = ?, year = ?, updated_at = ? WHERE id = ?",
-            (media_type, source.resource_kind, year, now, existing["id"]),
+            (media_type, resource_kind, year, now, existing["id"]),
         )
         return int(existing["id"])
 
@@ -106,8 +113,8 @@ def insert_source(
             INSERT INTO source_records (
                 media_id, import_id, source_type, provider, source_key, raw_label, raw_text,
                 url, filename, file_size, ed2k_hash, season, season_end, episode, parsed_year,
-                quality, codec, hdr, audio, release_group, metadata_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                quality, codec, hdr, audio, release_group, metadata_json, resource_class, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 media_id,
@@ -131,6 +138,7 @@ def insert_source(
                 source.audio,
                 source.release_group,
                 json.dumps(source.metadata, ensure_ascii=False),
+                infer_class(source.resource_kind, source.raw_label, source.media_type),
                 utc_now(),
             ),
         )
@@ -249,6 +257,7 @@ def import_content(
     source_path: str | None = None,
     kind: str = "auto",
     db_path: str | Path | None = None,
+    parsed_sources: Iterable[ParsedSource] | None = None,
 ) -> dict[str, Any]:
     init_db(db_path)
     actual_kind = detect_source_kind(content) if kind == "auto" else kind
@@ -270,7 +279,8 @@ def import_content(
         )
         import_id = int(cursor.lastrowid)
 
-        for source in iter_sources(content, actual_kind):
+        sources = parsed_sources if parsed_sources is not None else iter_sources(content, actual_kind)
+        for source in sources:
             total += 1
             try:
                 # Parser upgrades must not create empty works for an already imported source.
@@ -355,11 +365,22 @@ def get_stats(db_path: str | Path | None = None) -> dict[str, Any]:
             SELECT
                 COUNT(*) AS total,
                 SUM(source_type = '115') AS share_115,
+                SUM(source_type = '123') AS share_123,
+                SUM(source_type = 'guangya') AS share_guangya,
                 SUM(source_type = 'ed2k') AS ed2k,
                 SUM(file_size) AS bytes
             FROM source_records
             """
         ).fetchone()
+        provider_rows = connection.execute(
+            """
+            SELECT CASE WHEN source_type = 'ed2k' THEN 'ed2k' ELSE provider END AS provider_id,
+                   COUNT(*) AS total
+            FROM source_records
+            GROUP BY provider_id
+            ORDER BY provider_id
+            """
+        ).fetchall()
         duplicates = connection.execute(
             """
             SELECT COUNT(*) AS total FROM (
@@ -374,8 +395,11 @@ def get_stats(db_path: str | Path | None = None) -> dict[str, Any]:
         "sources": {
             "total": int(sources["total"] or 0),
             "share_115": int(sources["share_115"] or 0),
+            "share_123": int(sources["share_123"] or 0),
+            "share_guangya": int(sources["share_guangya"] or 0),
             "ed2k": int(sources["ed2k"] or 0),
             "bytes": int(sources["bytes"] or 0),
+            "providers": [{"id": row["provider_id"], "count": int(row["total"] or 0)} for row in provider_rows],
         },
         "multi_source": int(duplicates["total"] or 0),
         "imports": int(imports["total"] or 0),
@@ -543,7 +567,7 @@ def list_media(
 
     # All technical criteria must hold on the same source, not different versions of a work.
     source_where, source_params = [], []
-    if source_type in {"115", "ed2k"}:
+    if source_type in {"115", "123", "guangya", "ed2k"}:
         source_where.append("sf.source_type = ?")
         source_params.append(source_type)
     for field, selected, groups in (("quality", quality, QUALITY_GROUPS), ("codec", codec, CODEC_GROUPS)):
@@ -581,6 +605,8 @@ def list_media(
             (SELECT GROUP_CONCAT(DISTINCT sf.quality) FROM filtered_sources sf WHERE sf.media_id=m.id) AS matched_qualities,
             COUNT(s.id) AS source_count,
             SUM(s.source_type = '115') AS source_115_count,
+            SUM(s.source_type = '123') AS source_123_count,
+            SUM(s.source_type = 'guangya') AS source_guangya_count,
             SUM(s.source_type = 'ed2k') AS source_ed2k_count,
             GROUP_CONCAT(DISTINCT s.quality) AS qualities,
             MAX(COALESCE(s.season_end, s.season)) AS max_season,
@@ -641,6 +667,8 @@ def get_media(media_id: int, db_path: str | Path | None = None) -> dict[str, Any
                 m.*,
                 COUNT(s.id) AS source_count,
                 SUM(s.source_type = '115') AS source_115_count,
+                SUM(s.source_type = '123') AS source_123_count,
+                SUM(s.source_type = 'guangya') AS source_guangya_count,
                 SUM(s.source_type = 'ed2k') AS source_ed2k_count,
                 SUM(s.file_size) AS total_bytes,
                 MAX(COALESCE(s.season_end, s.season)) AS max_season,
@@ -756,19 +784,63 @@ def _format_ingestion_episode_labels(rows: list[dict[str, Any]]) -> list[str]:
     return episode_labels + season_labels
 
 
-def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) -> dict[str, Any]:
-    """Return webhook intake records with channel, provider and media details."""
+def list_ingestion_records(
+    limit: int = 100, db_path: str | Path | None = None,
+    status: str | None = None, query: str | None = None,
+) -> dict[str, Any]:
+    """Return webhook intake records with channel, provider and media details.
+
+    ``status`` optionally restricts the list to one event status such as
+    ``failed`` or ``pending_validation``; ``query`` matches channel, original
+    message, extracted link and identified media text. The today counter stays
+    global in both cases.
+    """
     bounded_limit = min(max(limit, 1), 250)
+    status = str(status).strip() if status else ""
+    query = str(query).strip() if query else ""
+
+    conditions: list[str] = []
+    params: list[Any] = []
+    if status:
+        conditions.append("e.status = ?")
+        params.append(status)
+    if query:
+        def escape_like(value: str) -> str:
+            return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+        needle = f"%{escape_like(query)}%"
+        conditions.append(
+            """(
+                e.channel_name LIKE ? ESCAPE '\\' OR e.channel_username LIKE ? ESCAPE '\\'
+                OR e.channel_id LIKE ? ESCAPE '\\' OR e.message_url LIKE ? ESCAPE '\\'
+                OR e.raw_text LIKE ? ESCAPE '\\' OR e.event_id LIKE ? ESCAPE '\\'
+                OR e.error LIKE ? ESCAPE '\\'
+                OR EXISTS (
+                    SELECT 1 FROM ingestion_links l
+                    LEFT JOIN source_records s ON s.source_key = l.source_key
+                    LEFT JOIN media_items m ON m.id = COALESCE(l.media_id, s.media_id)
+                    WHERE l.ingestion_id = e.id AND (
+                        m.title LIKE ? ESCAPE '\\' OR m.tmdb_title LIKE ? ESCAPE '\\'
+                        OR s.raw_label LIKE ? ESCAPE '\\' OR s.filename LIKE ? ESCAPE '\\'
+                        OR s.url LIKE ? ESCAPE '\\'
+                    )
+                )
+            )"""
+        )
+        params.extend([needle] * 12)
+
+    where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+    event_params = (*params, bounded_limit)
     with connect(db_path) as connection:
         events = connection.execute(
-            "SELECT * FROM ingestion_events ORDER BY received_at DESC LIMIT ?",
-            (bounded_limit,),
+            f"SELECT * FROM ingestion_events e{where} ORDER BY e.received_at DESC LIMIT ?",
+            event_params,
         ).fetchall()
         today_count = connection.execute(
             "SELECT COUNT(*) AS total FROM ingestion_events WHERE date(received_at, 'localtime') = date('now', 'localtime')",
         ).fetchone()["total"]
         links = connection.execute(
-            """
+            f"""
             SELECT l.ingestion_id, l.status AS link_status, l.provider,
                    COALESCE(l.media_id, s.media_id) AS media_id, COALESCE(m.tmdb_title, m.title) AS media_title,
                    COALESCE(m.year, s.parsed_year, CASE
@@ -778,10 +850,10 @@ def list_ingestion_records(limit: int = 100, db_path: str | Path | None = None) 
             FROM ingestion_links l
             LEFT JOIN source_records s ON s.source_key = l.source_key
             LEFT JOIN media_items m ON m.id = COALESCE(l.media_id, s.media_id)
-            WHERE l.ingestion_id IN (SELECT id FROM ingestion_events ORDER BY received_at DESC LIMIT ?)
+            WHERE l.ingestion_id IN (SELECT e.id FROM ingestion_events e{where} ORDER BY e.received_at DESC LIMIT ?)
             ORDER BY l.id
             """,
-            (bounded_limit,),
+            event_params,
         ).fetchall()
 
     media_by_event: dict[str, dict[int, dict[str, Any]]] = {}

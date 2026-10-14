@@ -4,6 +4,11 @@ import {
   getMedia,
   getMediaFilters,
   getMediaDetail,
+  getResources,
+  getResourceFilters,
+  getResourceDetail,
+  updateResource,
+  checkResource,
   getStats,
   linkCandidate,
   rejectCandidate,
@@ -27,6 +32,7 @@ import LibraryHero from "./components/LibraryHero";
 import CinematicFilters from "./components/CinematicFilters";
 import CinematicPosterGrid from "./components/CinematicPosterGrid";
 import ResourceLibrary, { ResourceDetail } from "./components/ResourceLibrary";
+import ResourceFilterToolbar from "./components/ResourceFilterToolbar";
 
 
 const DATA_VIEWS = new Set(["library", "resources", "pending", "duplicates"]);
@@ -48,20 +54,43 @@ const DEFAULT_FILTERS = {
   pageSize: 30,
 };
 
+const DEFAULT_RESOURCE_FILTERS = {
+  group: "all",
+  resource_class: "all",
+  provider: "all",
+  availability: "all",
+  tmdb_status: "all",
+  year: "all",
+  tag: "all",
+  quality: "all",
+  channel: "all",
+  updated: "all",
+  sort: "updated_desc",
+  page: 1,
+  pageSize: 30,
+};
+
 
 export default function App() {
   const [view, setView] = useState("library");
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const [resourceFilters, setResourceFilters] = useState(DEFAULT_RESOURCE_FILTERS);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   const [stats, setStats] = useState(null);
   const [config, setConfig] = useState(null);
   const [filterOptions, setFilterOptions] = useState(null);
+  const [resourceFilterOptions, setResourceFilterOptions] = useState(null);
   const [pageData, setPageData] = useState({ items: [], total: 0, page: 1, pages: 1 });
+  const [resourcePageData, setResourcePageData] = useState({ items: [], total: 0, page: 1, pages: 1, summary: {} });
   const [selectedId, setSelectedId] = useState(null);
   const [selectedItem, setSelectedItem] = useState(null);
+  const [selectedResourceId, setSelectedResourceId] = useState(null);
+  const [selectedResource, setSelectedResource] = useState(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [resourceDetailLoading, setResourceDetailLoading] = useState(false);
+  const [checkingResourceId, setCheckingResourceId] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [error, setError] = useState("");
@@ -95,14 +124,15 @@ export default function App() {
   }, [deferredSearch, filters, view]);
 
   const loadSummary = useCallback(async () => {
-    const [nextStats, nextConfig, nextOptions] = await Promise.all([getStats(), getConfig(), getMediaFilters()]);
+    const [nextStats, nextConfig, nextOptions, nextResourceOptions] = await Promise.all([getStats(), getConfig(), getMediaFilters(), getResourceFilters()]);
     setStats(nextStats);
     setConfig(nextConfig);
     setFilterOptions(nextOptions);
+    setResourceFilterOptions(nextResourceOptions);
   }, []);
 
   const loadMedia = useCallback(async () => {
-    if (!DATA_VIEWS.has(view)) return;
+    if (!DATA_VIEWS.has(view) || view === "resources") return;
     const requestId = ++mediaRequestRef.current;
     mediaAbortRef.current?.abort();
     const controller = new AbortController();
@@ -128,6 +158,54 @@ export default function App() {
     }
   }, [effectiveParams, view]);
 
+  const resourceParams = useMemo(() => ({
+    q: deferredSearch,
+    resource_group: resourceFilters.group,
+    resource_class: resourceFilters.resource_class,
+    provider: resourceFilters.provider,
+    availability: resourceFilters.availability,
+    tmdb_status: resourceFilters.tmdb_status,
+    year: resourceFilters.year,
+    tag: resourceFilters.tag === "all" ? "" : resourceFilters.tag,
+    quality: resourceFilters.quality,
+    channel: resourceFilters.channel,
+    updated: resourceFilters.updated,
+    sort: resourceFilters.sort,
+    page: resourceFilters.page,
+    page_size: resourceFilters.pageSize,
+    aggregate: resourceFilters.group === "person" ? "person" : "",
+  }), [deferredSearch, resourceFilters]);
+
+  const loadResources = useCallback(async () => {
+    if (view !== "resources") return;
+    const requestId = ++mediaRequestRef.current;
+    mediaAbortRef.current?.abort();
+    const controller = new AbortController();
+    mediaAbortRef.current = controller;
+    setLoading(true);
+    try {
+      const result = await getResources(resourceParams, controller.signal);
+      if (requestId !== mediaRequestRef.current) return;
+      if (result.page > result.pages) {
+        setResourceFilters((current) => ({ ...current, page: result.pages }));
+        return;
+      }
+      setResourcePageData(result);
+      setSelectedResourceId((current) => {
+        const contains = result.items.some((item) => item.resources
+          ? item.resources.some((resource) => resource.id === current)
+          : item.id === current);
+        if (contains) return current;
+        return result.items[0]?.resources?.[0]?.id ?? result.items[0]?.id ?? null;
+      });
+      setError("");
+    } catch (nextError) {
+      if (requestId === mediaRequestRef.current && nextError.name !== "AbortError") setError(nextError.message);
+    } finally {
+      if (requestId === mediaRequestRef.current) setLoading(false);
+    }
+  }, [resourceParams, view]);
+
   useEffect(() => {
     loadSummary().catch((nextError) => setError(nextError.message));
   }, [loadSummary]);
@@ -138,7 +216,12 @@ export default function App() {
   }, [loadMedia]);
 
   useEffect(() => {
-    if (!selectedId || !DATA_VIEWS.has(view)) {
+    loadResources().catch((nextError) => setError(nextError.message));
+    return () => { mediaRequestRef.current += 1; mediaAbortRef.current?.abort(); };
+  }, [loadResources]);
+
+  useEffect(() => {
+    if (!selectedId || !DATA_VIEWS.has(view) || view === "resources") {
       setSelectedItem(null);
       return undefined;
     }
@@ -161,6 +244,21 @@ export default function App() {
   }, [selectedId, view]);
 
   useEffect(() => {
+    if (!selectedResourceId || view !== "resources") {
+      setSelectedResource(null);
+      return undefined;
+    }
+    let active = true;
+    setSelectedResource(null);
+    setResourceDetailLoading(true);
+    getResourceDetail(selectedResourceId)
+      .then((item) => { if (active) setSelectedResource(item); })
+      .catch((nextError) => { if (active) setError(nextError.message); })
+      .finally(() => { if (active) setResourceDetailLoading(false); });
+    return () => { active = false; };
+  }, [selectedResourceId, view]);
+
+  useEffect(() => {
     const onKeyDown = (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -178,6 +276,7 @@ export default function App() {
     if (DATA_VIEWS.has(nextView) && nextView !== lastDataViewRef.current) {
       lastDataViewRef.current = nextView;
       setFilters((current) => ({ ...DEFAULT_FILTERS, availability: nextView === "library" ? "available" : "all", pageSize: current.pageSize }));
+      setResourceFilters((current) => ({ ...DEFAULT_RESOURCE_FILTERS, pageSize: current.pageSize }));
       setSearch("");
     } else {
       setFilters((current) => ({ ...current, page: 1 }));
@@ -192,8 +291,19 @@ export default function App() {
     setMobileInspectorOpen(false);
   }, []);
 
+  const changeResourceFilters = useCallback((patch) => {
+    setResourceFilters((current) => ({ ...current, ...patch, page: patch.page ?? 1 }));
+    setMobileInspectorOpen(false);
+  }, []);
+
   const clearFilters = useCallback(() => {
     setFilters((current) => ({ ...DEFAULT_FILTERS, availability: "all", pageSize: current.pageSize }));
+    setSearch("");
+    setMobileInspectorOpen(false);
+  }, []);
+
+  const clearResourceFilters = useCallback(() => {
+    setResourceFilters((current) => ({ ...DEFAULT_RESOURCE_FILTERS, group: current.group, pageSize: current.pageSize }));
     setSearch("");
     setMobileInspectorOpen(false);
   }, []);
@@ -204,9 +314,9 @@ export default function App() {
         setSelectedId(item.id);
         setSelectedItem(item);
       }
-      await Promise.all([loadSummary(), loadMedia()]);
+      await Promise.all([loadSummary(), loadMedia(), loadResources()]);
     },
-    [loadMedia, loadSummary],
+    [loadMedia, loadResources, loadSummary],
   );
 
   const handleSearchCandidates = useCallback(async () => {
@@ -312,22 +422,75 @@ export default function App() {
         + (result.removed_sources ? `已清理 ${result.removed_sources} 条已取消分享、${result.removed || 0} 条无来源记录。` : ""),
       );
       setError("");
-      await Promise.all([loadSummary(), loadMedia()]);
+      await Promise.all([loadSummary(), loadMedia(), loadResources()]);
     } catch (nextError) {
       setError(nextError.message);
     } finally {
       setSyncing(false);
     }
-  }, [loadMedia, loadSummary]);
+  }, [loadMedia, loadResources, loadSummary]);
+
+  const handleResourceCheck = useCallback(async (resourceId) => {
+    try {
+      setCheckingResourceId(resourceId);
+      const item = await checkResource(resourceId);
+      setSelectedResource(item);
+      setNotice(item.availability_status === "available" ? "来源检查完成，分享可用。" : "来源检查完成，请查看当前状态。 ");
+      await Promise.all([loadSummary(), loadResources()]);
+    } catch (nextError) {
+      setError(nextError.message);
+    } finally {
+      setCheckingResourceId(null);
+    }
+  }, [loadResources, loadSummary]);
+
+  const handleResourceUpdate = useCallback(async (values) => {
+    if (!selectedResourceId) return;
+    try {
+      const item = await updateResource(selectedResourceId, values);
+      setSelectedResource(item);
+      setNotice("资源信息已更新。 ");
+      await Promise.all([loadSummary(), loadResources()]);
+    } catch (nextError) {
+      setError(nextError.message);
+    }
+  }, [loadResources, loadSummary, selectedResourceId]);
+
+  const handleResourceAction = useCallback(async (resourceId, action) => {
+    try {
+      const item = selectedResource?.id === resourceId ? selectedResource : await getResourceDetail(resourceId);
+      if (!item?.url) throw new Error("来源链接暂不可用。");
+      if (action === "open") {
+        window.open(item.url, "_blank", "noopener,noreferrer");
+      } else {
+        await navigator.clipboard.writeText(item.url);
+        setNotice("分享链接已复制。 ");
+      }
+    } catch (nextError) {
+      setError(nextError.message);
+    }
+  }, [selectedResource]);
 
   const selectItem = useCallback((mediaId) => {
     setSelectedId(mediaId);
     setMobileInspectorOpen(true);
   }, []);
 
+  const selectResource = useCallback((resourceId) => {
+    setSelectedResourceId(resourceId);
+    setMobileInspectorOpen(true);
+  }, []);
+
+  const openResourceMedia = useCallback((mediaId) => {
+    if (!mediaId) return;
+    changeView("library");
+    setSelectedId(mediaId);
+    setMobileInspectorOpen(true);
+  }, [changeView]);
+
   return (
     <div className="app-shell">
-      <Sidebar view={view} onChange={changeView} stats={stats} config={config} />
+      <Sidebar view={view} onChange={changeView} stats={stats} config={config} providerOptions={resourceFilterOptions?.providers} />
       <div className={`app-main ${view === "resources" ? "app-main-resources" : ""}`}>
         {view !== "library" && <Topbar
           view={view}
@@ -335,10 +498,12 @@ export default function App() {
           onSearch={(value) => {
             setSearch(value);
             setFilters((current) => (current.page === 1 ? current : { ...current, page: 1 }));
+            setResourceFilters((current) => (current.page === 1 ? current : { ...current, page: 1 }));
           }}
           onSubmitSearch={() => {
             setSearch(search.trim());
             setFilters((current) => ({ ...current, page: 1 }));
+            setResourceFilters((current) => ({ ...current, page: 1 }));
             setMobileInspectorOpen(false);
           }}
           searchRef={searchRef}
@@ -373,8 +538,8 @@ export default function App() {
           </main>
         ) : DATA_VIEWS.has(view) ? (
           <>
-            <StatsBar stats={stats} activeView={view} />
-            {view === "resources" ? <><FilterToolbar view={view} filters={filters} options={filterOptions} search={search} loading={loading} total={pageData.total} onChange={changeFilters} onReset={clearFilters} onClearSearch={() => { setSearch(""); changeFilters({}); }} onRefresh={() => loadMedia()} /><div className="resource-library-layout"><ResourceLibrary items={pageData.items} loading={loading} selectedId={selectedId} onSelect={selectItem} total={pageData.total} page={pageData.page} pages={pageData.pages} onPageChange={(page) => changeFilters({ page })} /><ResourceDetail item={selectedItem} loading={detailLoading} onClose={() => setSelectedId(null)} /></div></> : null}
+            {view !== "resources" ? <StatsBar stats={stats} activeView={view} providerOptions={resourceFilterOptions?.providers} /> : null}
+            {view === "resources" ? <><ResourceFilterToolbar filters={resourceFilters} options={resourceFilterOptions} loading={loading} total={resourcePageData.total} summary={resourcePageData.summary} onChange={changeResourceFilters} onReset={clearResourceFilters} /><div className="resource-library-layout" id="resource-category-panel" role="tabpanel" aria-labelledby={`resource-tab-${resourceFilters.group}`}><ResourceLibrary items={resourcePageData.items} loading={loading} grouped={resourcePageData.aggregated === "person"} selectedId={selectedResourceId} onSelect={selectResource} total={resourcePageData.total} page={resourcePageData.page} pages={resourcePageData.pages} onPageChange={(page) => changeResourceFilters({ page })} onAction={handleResourceAction} onCheck={handleResourceCheck} checkingId={checkingResourceId} summary={resourcePageData.summary} onClearFilters={clearResourceFilters} /><ResourceDetail item={selectedResource} loading={resourceDetailLoading} onClose={() => setSelectedResourceId(null)} onAction={(resourceId, action) => action === "select" ? selectResource(resourceId) : handleResourceAction(resourceId, action)} onCheck={handleResourceCheck} checking={checkingResourceId === selectedResourceId} onUpdate={handleResourceUpdate} onViewMedia={openResourceMedia} mobileOpen={mobileInspectorOpen} /></div></> : null}
             <div className={`workspace-grid ${view === "resources" ? "resource-workspace-hidden" : ""}`}>
               <main className={`library-panel ${view === "resources" ? "resource-library-hidden" : ""}`}>
                 <FilterToolbar

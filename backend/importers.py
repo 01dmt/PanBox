@@ -5,14 +5,20 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Iterable, Iterator, Optional
-from urllib.parse import unquote
+from urllib.parse import quote, unquote, urlsplit
 
 import wordninja
 
 from .recognition import parse as parse_recognition
 
 
-SHARE_URL_RE = re.compile(r"https?://(?:www\.)?115(?:cdn)?\.com/s/[^\s\t<>]+", re.IGNORECASE)
+# Share URLs are parsed together so the rest of the ingestion pipeline can
+# treat cloud shares uniformly while preserving the provider on each source.
+# 123865.com/123pan.com are 123 网盘; guangyapan.com is 光鸭云盘.
+SHARE_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:115(?:cdn)?|123865|123pan|guangyapan)\.com/s/[^\s\t<>]+",
+    re.IGNORECASE,
+)
 ED2K_RE = re.compile(
     r"ed2k://\|file\|[^|]+\|\d+\|[A-Fa-f0-9]{32}\|/",
     re.IGNORECASE,
@@ -59,6 +65,7 @@ MEDIA_EXTENSION_RE = re.compile(
 SHARE_METADATA_RE = re.compile(
     r"(?i)\s*(?:访问码|提取码|密码)\s*[：:].*$|\s*复制这段内容.*$"
 )
+ACCESS_CODE_RE = re.compile(r"(?i)(?:访问码|提取码|访问密码|密码|password|pwd)\s*[：:=\s]+([A-Za-z0-9]{2,16})")
 TMDB_ID_RE = re.compile(r"(?i)\{?\s*tmdb(?:id)?\s*[-:=：]\s*(\d+)\s*\}?")
 SECONDARY_ALIAS_START_RE = re.compile(
     r"(?i)(?:^|[._\-\s])(BluRay|BDRip|DVDRip|WEB[._-]?DL|WEBRip|HDTV|REMUX)(?=$|[._\-\s])"
@@ -168,7 +175,12 @@ def infer_share_media_type(title: str, extra: str) -> str:
 def _is_generic_share_label(value: str) -> bool:
     compact = re.sub(r"[\s:：|→>\-]+", "", value.strip())
     compact = compact.replace("🔗", "")
-    return not compact or compact in {"链接", "点击跳转", "链接点击跳转"}
+    return (
+        not compact
+        or compact in {"链接", "点击跳转", "链接点击跳转"}
+        or value.lstrip().startswith(("🔗", "📎"))
+        or "点击保存到" in value
+    )
 
 
 def _extract_channel_fields(value: str) -> dict[str, object]:
@@ -222,6 +234,10 @@ def _share_heading_details(value: str) -> dict[str, object]:
     title = heading[: min(cut_points)] if cut_points else heading
     title = title.strip(" \t-–—|·()（）[]【】✨") or "未命名"
     title = title.splitlines()[0].strip(" \t-–—|·()（）[]【】✨") or "未命名"
+    # Some channels prefix the title with a human-readable category, for
+    # example ``📺 剧集：兰香如故 (2026)``. Keep the category as metadata but
+    # use the actual title for media grouping and TMDB matching.
+    title = re.sub(r"^(?:剧集|电影|动漫|综艺)\s*[：:]\s*", "", title).strip() or "未命名"
     if resource_kind == "series":
         title = re.sub(r"\s*[（(]系列[）)]?\s*$", "", title).strip() or title
     year = int(year_match.group(1)) if year_match else None
@@ -299,22 +315,44 @@ def _find_share_heading(lines: list[str], index: int) -> str | None:
         candidate = previous.strip()
         if not candidate or candidate.startswith(SHARE_METADATA_PREFIXES):
             continue
-        if any(marker in candidate for marker in ("📺", "🎥", "👤", "🗂")):
+        # A channel's category line also starts with ``🗂`` (for example
+        # ``🗂 分类：剧集/国产剧集``). It is metadata, not the work heading.
+        heading_marker = re.match(r"^([📺🎥👤🗂])\s*", candidate)
+        is_category = bool(re.match(r"^(?:🗂\s*)?(?:分类|收录版本|播出进度)\s*[：:]", candidate))
+        if heading_marker and not is_category:
             return "\n".join(line.strip() for line in lines[position:index] if line.strip())
-    for previous in lines[:index]:
+    for position, previous in enumerate(lines[:index]):
         candidate = previous.strip()
         if candidate and not candidate.startswith(SHARE_METADATA_PREFIXES) and not SHARE_URL_RE.search(candidate):
-            return candidate
+            return "\n".join(line.strip() for line in lines[position:index] if line.strip())
     return None
 
 
-def parse_share_line(line: str, *, context: str | None = None) -> Optional[ParsedSource]:
+def parse_share_line(
+    line: str,
+    *,
+    context: str | None = None,
+    access_context: str | None = None,
+) -> Optional[ParsedSource]:
     raw = line.rstrip("\r\n")
     match = SHARE_URL_RE.search(raw)
     if not match:
         return None
 
     url = match.group(0).rstrip("，。；;）)")
+    # Forwarded channel messages sometimes put the access code on a separate
+    # line. Attach it to the normalized URL before validation and de-duplication
+    # while leaving the original message untouched in ingestion_events.
+    parsed_url = urlsplit(url)
+    query_text = parsed_url.query.lower()
+    if not any(key in query_text for key in ("password=", "pwd=")):
+        code_match = ACCESS_CODE_RE.search("\n".join(value for value in (line, context or "", access_context or "") if value))
+        if code_match:
+            host = (parsed_url.hostname or "").lower().removeprefix("www.")
+            key = "pwd" if host in {"123865.com", "123pan.com"} else "password"
+            base_url = url.split("#", 1)[0]
+            fragment = f"#{url.split('#', 1)[1]}" if "#" in url else ""
+            url = f"{base_url}{'&' if '?' in base_url else '?'}{key}={quote(code_match.group(1), safe='')}{fragment}"
     prefix = raw[: match.start()].strip("\ufeff \t")
     suffix = raw[match.end() :].strip(" \t")
     label = prefix.split("\t", 1)[0].strip() if prefix else suffix
@@ -332,10 +370,17 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
             })
     details["media_type"] = "tv" if details.get("season") is not None or details.get("episode") is not None else details["media_type"]
 
+    host = (urlsplit(url).hostname or "").lower().removeprefix("www.")
+    if host in {"123865.com", "123pan.com"}:
+        provider = "123"
+    elif host == "guangyapan.com":
+        provider = "guangya"
+    else:
+        provider = "115"
     return ParsedSource(
-        source_type="115",
-        provider="115",
-        source_key=f"115:{url}",
+        source_type=provider,
+        provider=provider,
+        source_key=f"{provider}:{url}",
         title=str(details["title"]),
         year=details["year"],
         media_type=str(details["media_type"]),
@@ -370,7 +415,7 @@ def parse_share_line(line: str, *, context: str | None = None) -> Optional[Parse
     )
 
 
-def iter_share_sources(content: str) -> Iterator[ParsedSource]:
+def iter_share_sources(content: str, *, person_context: str | None = None) -> Iterator[ParsedSource]:
     lines = content.splitlines()
     for index, line in enumerate(lines):
         match = SHARE_URL_RE.search(line)
@@ -378,8 +423,9 @@ def iter_share_sources(content: str) -> Iterator[ParsedSource]:
             continue
         prefix = line[: match.start()].strip("\ufeff \t")
         label = prefix.split("\t", 1)[0].strip() if prefix else ""
-        context = _find_share_heading(lines, index) if _is_generic_share_label(label) else None
-        parsed = parse_share_line(line, context=context)
+        context = person_context or (_find_share_heading(lines, index) if _is_generic_share_label(label) else None)
+        access_context = lines[index + 1] if index + 1 < len(lines) and ACCESS_CODE_RE.search(lines[index + 1]) else None
+        parsed = parse_share_line(line, context=context, access_context=access_context)
         if parsed:
             yield parsed
 
@@ -531,9 +577,14 @@ def parse_ed2k_link(
     release_group_match = re.search(r"-([A-Za-z0-9]+)$", stem)
 
     context_value = re.sub(r"^\s*[📺🎥🎬👤🗂🍿🎞️]+\s*", "", context or "")
-    context_title, context_year = parse_title_year(context_value) if context else ("", None)
+    # Profile and collection headings may carry labelled metadata on following
+    # lines. Only the first line is the stable grouping title.
+    context_title_line = context_value.splitlines()[0].strip() if context_value else ""
+    context_title, context_year = parse_title_year(context_title_line) if context else ("", None)
     context_marker = re.match(r"^\s*([📺🎥🎬👤🗂])", context or "")
     resource_kind = "person" if context_marker and context_marker.group(1) == "👤" else "series" if context_marker and context_marker.group(1) == "🗂" else "media"
+    if resource_kind != "media":
+        media_type = "unknown"
     if context_title and context_title != "未命名" and not context_title.lower().startswith("链接"):
         title = context_title
         year = year or context_year
@@ -581,10 +632,10 @@ def _find_ed2k_heading(lines: list[str], index: int) -> str | None:
     return None
 
 
-def iter_ed2k_sources(content: str) -> Iterator[ParsedSource]:
+def iter_ed2k_sources(content: str, *, person_context: str | None = None) -> Iterator[ParsedSource]:
     lines = content.splitlines()
     for index, line in enumerate(lines):
-        context = _find_ed2k_heading(lines, index)
+        context = person_context or _find_ed2k_heading(lines, index)
         for match in ED2K_RE.finditer(line):
             parsed = parse_ed2k_link(match.group(0), raw_text=line, context=context)
             if parsed:
@@ -597,18 +648,18 @@ def detect_source_kind(content: str) -> str:
     if has_share and has_ed2k:
         return "mixed"
     if has_share:
-        return "115"
+        return "share"
     if has_ed2k:
         return "ed2k"
     return "unknown"
 
 
-def iter_sources(content: str, kind: str = "auto") -> Iterable[ParsedSource]:
+def iter_sources(content: str, kind: str = "auto", *, person_context: str | None = None) -> Iterable[ParsedSource]:
     selected = detect_source_kind(content) if kind == "auto" else kind
-    if selected in {"115", "mixed"}:
-        yield from iter_share_sources(content)
+    if selected in {"115", "123", "guangya", "share", "mixed"}:
+        yield from iter_share_sources(content, person_context=person_context)
     if selected in {"ed2k", "mixed"}:
-        yield from iter_ed2k_sources(content)
+        yield from iter_ed2k_sources(content, person_context=person_context)
 
 
 def content_digest(content: str) -> str:

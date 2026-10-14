@@ -27,7 +27,7 @@ from .repository import (
     save_candidates,
     save_imdb_lookup,
 )
-from .share115 import cleanup_cancelled_shares, enrich_media_share_sources, inspect_resource
+from .share115 import cleanup_cancelled_shares, inspect_resource
 
 
 API_BASE = "https://api.themoviedb.org/3"
@@ -346,7 +346,7 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
         episodic = episodic or source.get("season") is not None or source.get("episode") is not None
         source_year = source.get("parsed_year") or item.get("year")
         add_value(source.get("filename"), source_year)
-        add_value(source.get("raw_label"), source_year, label=source.get("source_type") == "115")
+        add_value(source.get("raw_label"), source_year, label=source.get("source_type") != "ed2k")
         raw_text = source.get("raw_text")
         if isinstance(raw_text, str):
             for tmdb_id in extract_tmdb_ids(raw_text):
@@ -361,23 +361,10 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
             except json.JSONDecodeError:
                 metadata = {}
         if isinstance(metadata, dict):
+            # Only message-derived metadata is trusted here. Cached share
+            # snapshots are no longer collected because fetching a 115
+            # directory costs many requests per share.
             add_value(metadata.get("extra"), source_year)
-            share_snapshot = metadata.get("share_snapshot")
-            if isinstance(share_snapshot, dict) and share_snapshot.get("status") == "ok":
-                add_value(share_snapshot.get("share_title"), source_year)
-                for name in share_snapshot.get("search_names") or []:
-                    add_value(name, source_year)
-                resource = inspect_resource(share_snapshot)
-                add_episode_coverage(resource)
-                resource_incomplete = resource_incomplete or share_snapshot.get("complete") is not True
-                if resource["kind"] != "unknown":
-                    resource_kinds.add(resource["kind"])
-                if resource["kind"] in {"tv", "single_video"}:
-                    episodic = episodic or resource["kind"] == "tv"
-                    if resource["titles"]:
-                        resource_groups.append(resource["titles"])
-                        for name in resource["titles"]:
-                            add_value(name, source_year, label=True)
 
     return SearchContext(
         terms=terms,
@@ -1140,30 +1127,27 @@ def search_media(
     media_id: int,
     *,
     auto_link: bool = False,
-    refresh_share: bool = False,
+    check_share: bool = True,
     db_path: str | Path | None = None,
     client: TmdbClient | None = None,
     imdb_client: ImdbClient | None = None,
 ) -> dict[str, Any]:
+    """Search TMDB using only the identity extracted from the ingested message.
+
+    Directory snapshots are no longer fetched: walking a 115 share needed up to
+    a dozen requests each and mass access triggered 115 access restrictions.
+    ``check_share`` only runs the local cleanup of already cached cancellations.
+    """
     tmdb = client or TmdbClient()
-    cleanup = cleanup_cancelled_shares(db_path, media_id=media_id)
+    cleanup = cleanup_cancelled_shares(db_path, media_id=media_id) if check_share else {"removed": 0, "media_removed": 0}
     item = get_media(media_id, db_path)
     if not item:
         if cleanup["media_removed"]:
             return {"status": "removed", "linked": False, "media_id": media_id, "candidates": [], "removed_sources": cleanup["removed"]}
         raise TmdbError(f"媒体记录 {media_id} 不存在。")
     if item.get("tmdb_status") == "matched" and item.get("tmdb_id"):
-        if refresh_share:
-            refreshed = enrich_media_share_sources(media_id, db_path=db_path, force=True)
-            cleanup["removed"] += refreshed["removed"]
         return {"status": "matched", "linked": True, "media_id": media_id, "candidates": item["candidates"], "removed_sources": cleanup["removed"]}
-    refreshed = enrich_media_share_sources(media_id, db_path=db_path, force=refresh_share)
-    removed_sources = cleanup["removed"] + int(refreshed.get("removed", 0))
-    item = get_media(media_id, db_path)
-    if not item:
-        if refreshed.get("media_removed"):
-            return {"status": "removed", "linked": False, "media_id": media_id, "candidates": [], "removed_sources": removed_sources}
-        raise TmdbError(f"媒体记录 {media_id} 不存在。")
+    removed_sources = cleanup["removed"]
 
     try:
         candidates = matching_candidates(tmdb.search(item))

@@ -100,11 +100,16 @@ def fetch_resource_page(url: str) -> tuple[str | None, str]:
     return _page_title(parser), "\n".join(parts)
 
 
-def expand_resource_pages(text: str) -> str:
+def expand_resource_pages(text: str, inherited_heading: str | None = None) -> str:
     """Append source-bearing content from supported resource pages.
 
     The original message remains at the front so it is still retained verbatim
     in the ingestion record. Only explicitly supported HTTPS hosts are fetched.
+
+    ``inherited_heading`` is used by channel-specific ingestion rules when a
+    resource page is an extension of a person or collection entry. In that
+    case the page title must not turn the sources back into ordinary movies or
+    TV entries.
     """
     urls: list[str] = []
     seen: set[str] = set()
@@ -135,7 +140,9 @@ def expand_resource_pages(text: str) -> str:
         if not source_lines and not nested:
             continue
         page_host = urlsplit(url).hostname.lower().removeprefix("www.")
-        if not title:
+        if inherited_heading:
+            title = inherited_heading
+        elif not title:
             before = text[: text.find(url)]
             heading_match = re.findall(r"(?m)^\s*([📺🎥🎬👤🗂].+)$", before)
             title = heading_match[-1].strip() if heading_match else None

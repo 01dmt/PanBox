@@ -150,15 +150,6 @@ class ImdbTests(unittest.TestCase):
                                          candidate_title="Film Name", candidate_original_title="Film Name",
                                          candidate_year=2021, candidate_type="movie"), 0)
 
-    def test_imdb_year_exception_does_not_bypass_other_resource_guards(self):
-        tmdb = FakeTmdb()
-        tmdb.detail["release_date"] = "2021-01-01"
-        item = {"title": "Film Name", "year": 2020, "sources": [{"source_type": "115", "metadata_json": {
-            "share_snapshot": {"version": 2, "status": "ok", "complete": False, "files": []},
-        }}]}
-        result = tmdb.imdb_fallback(item, FakeImdb([self.row()]))
-        self.assertEqual(result["evidence"]["status"], "review")
-        self.assertFalse(should_auto_link(result["candidates"]))
 
     def test_no_mapping_multiple_mappings_or_multiple_imdb_ids_do_not_guess(self):
         for found, status in [({}, "no_tmdb_mapping"),
@@ -192,8 +183,7 @@ class ImdbTests(unittest.TestCase):
             db = Path(directory)/"test.db"
             import_content("Film Name (2020) https://115.com/s/test", "test", db_path=db)
             mid = list_media(db_path=db)["items"][0]["id"]
-            with patch("backend.tmdb.enrich_media_share_sources"):
-                fn(db, mid)
+            fn(db, mid)
 
     def test_normal_candidates_even_low_scores_do_not_trigger_imdb(self):
         def run(db, mid):
@@ -279,8 +269,7 @@ class ImdbTests(unittest.TestCase):
             update_media_fields(new_id, {"title": "Film Name"}, db)
             tmdb = FakeTmdb()
             tmdb.detail["release_date"] = "2021-01-01"
-            with patch("backend.tmdb.enrich_media_share_sources"):
-                search_media(new_id, auto_link=True, db_path=db, client=tmdb, imdb_client=FakeImdb([self.row()]))
+            search_media(new_id, auto_link=True, db_path=db, client=tmdb, imdb_client=FakeImdb([self.row()]))
             for query in ["Film Name", "tt1234567"]:
                 page = list_media(query=query, db_path=db)
                 self.assertEqual(page["total"], 1)

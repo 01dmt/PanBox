@@ -6,7 +6,7 @@ import { formatNumber } from "../lib/format";
 const AVAILABILITY = [["all", "全部作品"], ["available", "有资源"], ["missing", "无资源"]];
 const TYPES = [["all", "全部类型"], ["movie", "电影"], ["tv", "剧集"], ["unknown", "待判断"]];
 const RESOURCE_KINDS = [["all", "全部资源"], ["media", "影视"], ["person", "人物"], ["series", "系列"]];
-const SOURCES = [["all", "全部来源"], ["115", "115 分享"], ["ed2k", "ED2K"]];
+const SOURCES = [["all", "全部来源"], ["115", "115 分享"], ["123", "123 网盘"], ["guangya", "光鸭云盘"], ["ed2k", "ED2K"]];
 const STATUSES = [["all", "全部状态"], ["matched", "已匹配"], ["pending", "全部待处理"], ["unsearched", "未搜索"], ["review", "待确认"], ["not_found", "未找到"], ["error", "匹配错误"]];
 const QUALITIES = [["all", "全部清晰度"], ["2160P", "4K / 2160P"], ["1080P", "1080P"], ["1080I", "1080I"], ["720P", "720P"], ["480P", "480P"], ["unknown", "未识别"]];
 const CODECS = [["all", "全部编码"], ["h265", "H.265 / HEVC"], ["h264", "H.264 / AVC"], ["av1", "AV1"], ["unknown", "未识别"]];

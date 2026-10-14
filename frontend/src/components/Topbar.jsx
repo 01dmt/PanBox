@@ -35,8 +35,8 @@ export default function Topbar({
             ref={searchRef}
             value={search}
             onChange={(event) => onSearch(event.target.value)}
-            placeholder="片名、年份、TMDB ID、缓存文件名"
-            aria-label="搜索资料库"
+            placeholder={view === "resources" ? "标题、文件名、原始消息" : "片名、年份、TMDB ID、缓存文件名"}
+            aria-label={view === "resources" ? "搜索资源来源" : "搜索资料库"}
           />
           <button type="button" className="search-clear" onClick={() => onSearch("")} disabled={!search} title="清空搜索" aria-label="清空搜索">
             <X size={16} aria-hidden="true" />

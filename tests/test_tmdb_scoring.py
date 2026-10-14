@@ -28,28 +28,12 @@ class FakeTmdbClient(TmdbClient):
 class TmdbScoringTests(unittest.TestCase):
     @staticmethod
     def resource_item(title, year, names, complete=True):
-        return {"title": title, "year": year, "media_type": "unknown", "sources": [{
-            "source_type": "115", "metadata_json": {"share_snapshot": {
-                "status": "ok", "version": 2, "complete": complete,
-                "files": [{"id": str(i), "name": n, "path": n} for i, n in enumerate(names)],
-                "search_names": names,
-            }},
-        }]}
+        # Message-derived file names only; 115 directory snapshots are no
+        # longer fetched or used as recognition evidence.
+        return {"title": title, "year": year, "media_type": "unknown", "sources": [
+            {"source_type": "ed2k", "filename": name, "raw_label": name} for name in names
+        ]}
 
-    def test_share_filename_disambiguates_the_apprentice_from_a_same_named_tv_show(self) -> None:
-        movie = {"id": 1182047, "title": "飞黄腾达", "original_title": "The Apprentice", "media_type": "movie", "release_date": "2024-10-09"}
-        tv = {"id": 246298, "name": "飞黄腾达", "original_name": "飛黃騰達", "media_type": "tv", "first_air_date": "2024-02-12"}
-        def respond(path, params):
-            if path == "/tv/246298":
-                return {**tv, "name": "The Money Game"}
-            return {"results": [movie, tv]}
-        client = FakeTmdbClient(respond)
-        item = self.resource_item("飞黄腾达", 2024, ["The.Apprentice.2024.2160p.mkv"])
-        cs = client.search(item)
-        self.assertTrue(should_auto_link(cs))
-        self.assertEqual(cs[0]["tmdb_id"], 1182047)
-        self.assertTrue(any(p == "/tv/246298" for p, _ in client.calls))
-        self.assertTrue(cs[0]["match_evidence"]["resource_title_exact"])
 
     def test_single_video_does_not_overrule_a_tv_candidate_with_the_same_original_name(self) -> None:
         results = [
@@ -82,11 +66,6 @@ class TmdbScoringTests(unittest.TestCase):
         item = self.resource_item("测试片", 2024, ["Test.Show.S01E01.2024.mkv"])
         self.assertTrue(should_auto_link(FakeTmdbClient(respond).search(item)))
 
-    def test_incomplete_share_content_stays_for_review(self) -> None:
-        result = {"id": 1, "title": "Example", "media_type": "movie", "release_date": "2024-01-01"}
-        cs = FakeTmdbClient(lambda p, q: {"results": [result]}).search(self.resource_item("Example", 2024, ["Example.2024.mkv"], complete=False))
-        self.assertFalse(should_auto_link(cs))
-        self.assertTrue(cs[0]["match_evidence"]["resource_incomplete"])
 
     def test_conflicting_resources_do_not_force_a_type(self) -> None:
         item = self.resource_item("Example", 2024, ["Example.2024.mkv", "Example.S01E01.2024.mkv"])
@@ -94,16 +73,6 @@ class TmdbScoringTests(unittest.TestCase):
         self.assertTrue(context.resource_conflict)
         result = {"id": 1, "title": "Example", "media_type": "movie", "release_date": "2024-01-01"}
         self.assertFalse(should_auto_link(FakeTmdbClient(lambda p, q: {"results": [result]}).search(item)))
-
-    def test_file_name_conflicting_with_the_share_label_is_not_auto_linked(self) -> None:
-        result = {"id": 1, "name": "苍兰诀", "original_name": "苍兰诀", "media_type": "tv", "first_air_date": "2022-01-01"}
-        def respond(path, params):
-            if path == "/tv/1":
-                return {**result, "name": "Love Between Fairy and Devil"}
-            return {"results": [result]}
-        cs = FakeTmdbClient(respond).search(self.resource_item("苍兰诀", 2022, ["Imperfect.Victim.S01E01.2022.mkv"]))
-        self.assertFalse(should_auto_link(cs))
-        self.assertTrue(cs[0]["match_evidence"]["resource_name_conflict"])
 
     @staticmethod
     def language_candidates():
@@ -176,8 +145,7 @@ class TmdbScoringTests(unittest.TestCase):
             db = Path(directory) / "media.db"
             import_content("人间中毒 (2014) https://115.com/s/test", "test.txt", db_path=db)
             mid = list_media(db_path=db)["items"][0]["id"]
-            with patch("backend.tmdb.enrich_media_share_sources"):
-                result = search_media(mid, auto_link=True, db_path=db, client=client)
+            result = search_media(mid, auto_link=True, db_path=db, client=client)
             self.assertEqual(result["candidate"]["tmdb_id"], 269955)
             self.assertEqual(get_media(mid, db)["tmdb_id"], 269955)
 
@@ -304,8 +272,7 @@ class TmdbScoringTests(unittest.TestCase):
             db = Path(directory) / "media.db"
             import_content("Example (2020) https://115.com/s/test", "test.txt", db_path=db)
             mid = list_media(db_path=db)["items"][0]["id"]
-            with patch("backend.tmdb.enrich_media_share_sources"):
-                result = search_media(mid, auto_link=True, db_path=db, client=client)
+            result = search_media(mid, auto_link=True, db_path=db, client=client)
             self.assertEqual(result["candidate"]["tmdb_id"], 2)
             self.assertEqual(get_media(mid, db)["tmdb_id"], 2)
 
@@ -315,7 +282,7 @@ class TmdbScoringTests(unittest.TestCase):
             db = Path(directory) / "media.db"
             import_content("Example (2020) https://115.com/s/test", "test.txt", db_path=db)
             mid = list_media(db_path=db)["items"][0]["id"]
-            with patch("backend.tmdb.enrich_media_share_sources"), patch("backend.tmdb.ImdbClient") as imdb:
+            with patch("backend.tmdb.ImdbClient") as imdb:
                 imdb.return_value.exact_matches.return_value = []
                 result = search_media(mid, auto_link=True, db_path=db, client=client)
             self.assertEqual(result["status"], "not_found")

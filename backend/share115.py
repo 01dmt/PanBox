@@ -39,10 +39,23 @@ UNAVAILABLE_ERRNOS = {4100008, 4100012}
 
 
 class Share115Error(RuntimeError):
-    def __init__(self, message: str, errno: int | None = None, *, risk_control: bool = False):
+    def __init__(
+        self, message: str, errno: int | None = None, *,
+        risk_control: bool = False, terminal: bool | None = None, gate_blocked: bool = False,
+    ):
         super().__init__(message)
         self.errno = errno
         self.risk_control = risk_control
+        # A terminal failure proves the share or its access code is wrong and
+        # must never be retried. Only explicit business codes, HTTP 404 or a
+        # clear business message qualify; everything else stays retryable.
+        self.terminal = bool(terminal) if terminal is not None else (
+            (not risk_control)
+            and (errno in INVALID_SHARE_ERRNOS | UNAVAILABLE_ERRNOS or "HTTP 404" in message)
+        )
+        # True when the local request gate refused the call before any network
+        # traffic; such a failure says nothing about the link itself.
+        self.gate_blocked = gate_blocked
 
 
 class ShareRequestGate:
@@ -64,9 +77,9 @@ class ShareRequestGate:
                     raise ValueError("invalid gate state")
                 next_at = float(state.get("next_at", 0))
             except (ValueError, TypeError):
-                raise Share115Error("115 请求保护状态异常，已停止访问，请检查本地状态文件。", risk_control=True)
+                raise Share115Error("115 请求保护状态异常，已停止访问，请检查本地状态文件。", risk_control=True, gate_blocked=True)
             if state.get("paused"):
-                raise Share115Error("115 请求已因访问限制暂停，请先人工确认恢复，不会自动重试。", risk_control=True)
+                raise Share115Error("115 请求已因访问限制暂停，请先人工确认恢复，不会自动重试。", risk_control=True, gate_blocked=True)
             delay = next_at - time.time()
             if delay > 0:
                 time.sleep(delay)
@@ -130,7 +143,8 @@ def parse_share_url(url: str) -> tuple[str, str]:
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) < 2 or parts[-2] != "s" or not parts[-1]:
         raise Share115Error("115 分享链接缺少分享码。")
-    receive_code = parse_qs(parsed.query).get("password", [""])[0]
+    query = parse_qs(parsed.query)
+    receive_code = (query.get("password") or query.get("pwd") or [""])[0]
     return parts[-1], receive_code
 
 
@@ -190,10 +204,19 @@ class Share115Client:
                 except (TypeError, ValueError):
                     errno = None
                 message = str(payload.get("error") or payload.get("message") or "分享内容不可访问")
-                risk = errno not in {*INVALID_SHARE_ERRNOS, *UNAVAILABLE_ERRNOS} or bool(
-                    re.search(r"风控|频繁|验证码|验证|访问限制|访问被阻断|captcha|too many|rate.?limit", message, re.I)
-                )
-                raise Share115Error(message, errno, risk_control=risk)
+                terminal_message = bool(re.search(r"密码|提取码|分享不存在|不存在|已取消|失效|过期|无效", message, re.I))
+                strong_risk = bool(re.search(r"风控|频繁|验证码|访问限制|访问被阻断|captcha|too many|rate.?limit", message, re.I))
+                if terminal_message and not strong_risk:
+                    # A clear password/dead-share message is a business
+                    # decision, never access risk control - even when the
+                    # wording contains "验证" (e.g. "密码验证失败").
+                    risk = False
+                else:
+                    risk = (errno not in {*INVALID_SHARE_ERRNOS, *UNAVAILABLE_ERRNOS} and not terminal_message) or strong_risk or bool(
+                        re.search(r"验证", message, re.I)
+                    )
+                terminal = (not risk) and (errno in {*INVALID_SHARE_ERRNOS, *UNAVAILABLE_ERRNOS} or terminal_message)
+                raise Share115Error(message, errno, risk_control=risk, terminal=terminal)
             data = payload.get("data")
             if not isinstance(data, dict):
                 raise Share115Error("115 分享接口缺少目录数据，已暂停访问。", risk_control=True)
@@ -397,6 +420,14 @@ def enrich_media_share_sources(
     client: Share115Client | None = None,
     force: bool = False,
 ) -> dict[str, int]:
+    """Fetch and cache 115 directory snapshots for one media record.
+
+    Disabled on purpose: walking every share needs up to a dozen requests each,
+    so mass matching triggered 115 access restrictions. Nothing in the
+    ingestion, matching or resource-library flow calls this any more; PanBox
+    relies on what the ingested message provided. Re-enabling it requires an
+    explicit access-volume decision (see PROJECT.md "115 校验与失效检查").
+    """
     share_client = client or Share115Client()
     results = {"processed": 0, "enriched": 0, "unavailable": 0, "errors": 0, "removed": 0, "media_removed": 0}
     with connect(db_path) as connection:

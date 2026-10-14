@@ -14,14 +14,12 @@ from backend.tmdb import TmdbClient, TmdbError, collect_search_context, search_m
 
 
 def resource_item(names=None, complete=True):
+    # Recognition now relies on message-derived file names only (ED2K style);
+    # directory snapshots are no longer fetched or read.
     names = names or ["Show.S01E01-E79.mp4"]
-    return {"title": "Show", "year": 2025, "media_type": "tv", "sources": [{
-        "source_type": "115", "metadata_json": {"share_snapshot": {
-            "version": 2, "status": "ok", "complete": complete,
-            "search_names": names,
-            "files": [{"name": n, "path": n} for n in names],
-        }},
-    }]}
+    return {"title": "Show", "year": 2025, "media_type": "tv", "sources": [
+        {"source_type": "ed2k", "filename": name, "raw_label": name, "complete": complete} for name in names
+    ]}
 
 
 def tv_details(mid, counts, **overrides):
@@ -84,11 +82,6 @@ class EpisodeParsingTests(unittest.TestCase):
         self.assertEqual(context.resource_episodes, [])
         self.assertTrue(context.resource_episode_incomplete)
 
-    def test_share_labels_and_incomplete_scans_are_not_episode_evidence(self):
-        item = resource_item(["Show.mp4"])
-        item["sources"][0]["metadata_json"]["share_snapshot"]["share_title"] = "Show.S01E01-E79"
-        self.assertEqual(collect_search_context(item).resource_episodes, [])
-        self.assertEqual(collect_search_context(resource_item(complete=False)).resource_episodes, [])
 
     def test_ed2k_episodes_use_the_same_parser(self):
         item = {"title": "Show", "year": 2025, "sources": [
@@ -96,12 +89,6 @@ class EpisodeParsingTests(unittest.TestCase):
         ]}
         self.assertEqual(collect_search_context(item).resource_episodes[0]["episode_count"], 3)
 
-    def test_separate_shares_are_not_combined_to_invent_full_coverage(self):
-        item = resource_item(["Show.S01E01-E40.mp4"])
-        item["sources"].extend(resource_item(["Show.S01E41-E79.mp4"])["sources"])
-        coverage = collect_search_context(item).resource_episodes
-        self.assertEqual([row["first_episode"] for row in coverage], [1, 41])
-        self.assertFalse(should_auto_link(EpisodeClient().search(item)))
 
 
 class EpisodeMatchingTests(unittest.TestCase):
@@ -153,9 +140,9 @@ class EpisodeMatchingTests(unittest.TestCase):
             client.request = lambda p, q=None: {**original_request(p, q), **fields} if p == "/tv/307496" else original_request(p, q)
             self.assertFalse(should_auto_link(client.search(resource_item())))
 
-    def test_partial_resources_and_no_episode_numbers_do_not_trigger_lookups(self):
+    def test_no_episode_numbers_do_not_trigger_lookups(self):
         for item in [
-            resource_item(complete=False), resource_item(["Show.S01.mp4"]),
+            resource_item(["Show.S01.mp4"]),
             resource_item(["Show.S01E10-E79.mp4"]), resource_item(["Show.S01E01.mp4", "Show.S01E79.mp4"]),
             resource_item(["Show.S01E01.mp4"]), resource_item(["Show.S01E01-S02E79.mp4"]),
         ]:
@@ -197,27 +184,6 @@ class EpisodeMatchingTests(unittest.TestCase):
         candidates = EpisodeClient().search(item)
         self.assertFalse(any(c["match_evidence"].get("season_episode_match") for c in candidates))
 
-    def test_database_persists_evidence_and_links_correct_candidate(self):
-        with tempfile.TemporaryDirectory() as directory:
-            db = Path(directory) / "media.db"
-            import_content("Show (2025) https://115.com/s/test", "test.txt", db_path=db)
-            mid = list_media(db_path=db)["items"][0]["id"]
-            with connect(db) as connection:
-                connection.execute("UPDATE source_records SET metadata_json = ?", (
-                    json.dumps(resource_item()["sources"][0]["metadata_json"]),
-                ))
-            with patch("backend.tmdb.enrich_media_share_sources", return_value={"removed": 0}):
-                result = search_media(mid, auto_link=False, db_path=db, client=EpisodeClient())
-                self.assertEqual(result["status"], "review")
-                with connect(db) as connection:
-                    payload = json.loads(connection.execute(
-                        "SELECT payload_json FROM tmdb_candidates WHERE tmdb_id=286363",
-                    ).fetchone()[0])
-                self.assertEqual(payload["_match_evidence"]["season_episode_comparison"]["status"], "exact")
-                result = search_media(mid, auto_link=True, db_path=db, client=EpisodeClient())
-                self.assertTrue(result["linked"])
-                self.assertEqual(get_media(mid, db)["tmdb_id"], 286363)
-                self.assertEqual(len(get_media(mid, db)["sources"]), 1)
 
 
 if __name__ == "__main__":

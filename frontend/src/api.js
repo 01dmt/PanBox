@@ -41,8 +41,12 @@ export function getImports() {
   return request("/api/imports?limit=100");
 }
 
-export function getIngestionRecords() {
-  return request("/api/ingestion/records?limit=100");
+export function getIngestionRecords(status, query) {
+  const filters = [];
+  if (status && status !== "all") filters.push(`status=${encodeURIComponent(status)}`);
+  if (query) filters.push(`q=${encodeURIComponent(query)}`);
+  const suffix = filters.length ? `&${filters.join("&")}` : "";
+  return request(`/api/ingestion/records?limit=100${suffix}`);
 }
 
 export function getIngestionRecord(ingestionId) {
@@ -51,6 +55,14 @@ export function getIngestionRecord(ingestionId) {
 
 export function reprocessIgnoredIngestion(limit = 100) {
   return request("/api/ingestion/reprocess", { method: "POST", body: JSON.stringify({ limit }) });
+}
+
+export function retryIngestionRecord(ingestionId) {
+  return request(`/api/ingestion/records/${encodeURIComponent(ingestionId)}/retry`, { method: "POST", body: "{}" });
+}
+
+export function retryFailedIngestions(limit = 100) {
+  return request("/api/ingestion/retry-failed", { method: "POST", body: JSON.stringify({ limit }) });
 }
 
 export function getMediaFilters() {
@@ -69,6 +81,33 @@ export function getMedia(params, signal) {
 
 export function getMediaDetail(mediaId) {
   return request(`/api/media/${mediaId}`);
+}
+
+export function getResources(params, signal) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
+  });
+  return request(`/api/resources?${query.toString()}`, { signal });
+}
+
+export function getResourceFilters() {
+  return request("/api/resources/filters");
+}
+
+export function getResourceDetail(resourceId) {
+  return request(`/api/resources/${resourceId}`);
+}
+
+export function updateResource(resourceId, values) {
+  return request(`/api/resources/${resourceId}`, {
+    method: "PATCH",
+    body: JSON.stringify(values),
+  });
+}
+
+export function checkResource(resourceId) {
+  return request(`/api/resources/${resourceId}/check`, { method: "POST", body: "{}" });
 }
 
 export function updateMedia(mediaId, values) {

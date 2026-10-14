@@ -17,8 +17,9 @@ from .repository import (
     import_content, link_tmdb, list_imports, list_ingestion_records, list_media, unlink_tmdb,
     update_media_fields,
 )
+from .resources import check_resource, get_resource, get_resource_filters, list_resources, update_resource
 from .schema import ROOT_DIR, init_db, resolve_db_path
-from .share115 import Share115Error, cleanup_cancelled_shares
+from .share115 import Share115Error
 from .share_audit import audit_status, pause_audit
 from .tmdb import TmdbClient, TmdbError, bulk_match, search_media
 from .telegram_avatar import AVATAR_CACHE_DIR, cache_channel_avatar, normalize_channel_username
@@ -30,6 +31,7 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
     database = resolve_db_path(db_path)
     static_root = Path(static_dir).resolve() if static_dir else DIST_DIR.resolve()
     init_db(database)
+    ingestion.start_validation_worker(database)
     app = FastAPI(title="PanBox API", version="1.0", docs_url="/api/docs", redoc_url=None)
     app.state.db_path = database
     app.state.static_dir = static_root
@@ -110,7 +112,12 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
     async def imports(limit: int = Query(50, ge=1, le=250)): return {"items": list_imports(limit, db())}
 
     @app.get("/api/ingestion/records")
-    async def ingestion_records(limit: int = Query(100, ge=1, le=250)): return list_ingestion_records(limit, db())
+    async def ingestion_records(
+        limit: int = Query(100, ge=1, le=250),
+        status: Optional[str] = Query(None),
+        q: Optional[str] = Query(None),
+    ):
+        return list_ingestion_records(limit, db(), status, q)
 
     @app.get("/api/ingestion/records/{ingestion_id}")
     async def ingestion_record_detail(ingestion_id: str):
@@ -122,12 +129,59 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
     async def reprocess_ingestion(body: dict[str, Any]):
         return ingestion.reprocess_ignored(int(body.get("limit") or 100), db())
 
+    @app.post("/api/ingestion/records/{ingestion_id}/retry")
+    async def retry_ingestion_record(ingestion_id: str):
+        try:
+            return ingestion.retry_ingestion_event(ingestion_id, db())
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.post("/api/ingestion/retry-failed")
+    async def retry_failed_ingestion(body: dict[str, Any]):
+        return ingestion.retry_failed_ingestions(int(body.get("limit") or 100), db())
+
     @app.get("/api/media/filters")
     async def media_filters(): return get_media_filters(db())
 
     @app.get("/api/media")
     async def media(q: str = "", status: str = "all", type: str = "all", resource_kind: str = "all", source: str = "all", availability: str = "all", year: str = "all", genre: str = "all", country: str = "all", quality: str = "all", codec: str = "all", hdr: str = "all", multi_source: bool = False, sort: str = "updated_desc", page: int = 1, page_size: int = 30):
         return list_media(query=q, status=status, media_type=type, resource_kind=resource_kind, source_type=source, availability=availability, year=year, genre=genre, country=country, quality=quality, codec=codec, hdr=hdr, multi_source_only=multi_source, sort=sort, page=page, page_size=page_size, db_path=db())
+
+    @app.get("/api/resources/filters")
+    async def resource_filters():
+        return get_resource_filters(db())
+
+    @app.get("/api/resources")
+    async def resources(
+        q: str = "", resource_group: str = "all", resource_class: str = "all", provider: str = "all", availability: str = "all",
+        tmdb_status: str = "all", year: str = "all", tag: str = "", quality: str = "all",
+        channel: str = "all", updated: str = "all", sort: str = "updated_desc", page: int = 1,
+        page_size: int = 30, aggregate: str = "",
+    ):
+        return list_resources(q=q, resource_group=resource_group, resource_class=resource_class, provider=provider, availability=availability,
+                              tmdb_status=tmdb_status, year=year, tag=tag, quality=quality, channel=channel,
+                              updated=updated, sort=sort, page=page, page_size=page_size, aggregate=aggregate, db_path=db())
+
+    @app.get("/api/resources/{resource_id}")
+    async def resource_detail(resource_id: int):
+        item = get_resource(resource_id, db())
+        if not item:
+            raise HTTPException(404, "资源来源不存在。")
+        return item
+
+    @app.post("/api/resources/{resource_id}/check")
+    async def resource_check(resource_id: int):
+        item = check_resource(resource_id, db())
+        if not item:
+            raise HTTPException(404, "资源来源不存在。")
+        return item
+
+    @app.patch("/api/resources/{resource_id}")
+    async def patch_resource(resource_id: int, body: dict[str, Any]):
+        item = update_resource(resource_id, body, db())
+        if not item:
+            raise HTTPException(404, "资源来源不存在。")
+        return item
 
     @app.get("/api/media/{media_id}")
     async def media_detail(media_id: int):
@@ -159,7 +213,7 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
 
     @app.post("/api/media/{media_id}/candidates")
     async def candidates(media_id: int, body: dict[str, Any]):
-        result = search_media(media_id, auto_link=bool(body.get("auto_link", False)), refresh_share=bool(body.get("refresh_share", False)), db_path=db())
+        result = search_media(media_id, auto_link=bool(body.get("auto_link", False)), db_path=db())
         result["item"] = get_media(result.get("media_id", media_id), db())
         return result
 

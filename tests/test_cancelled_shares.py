@@ -6,7 +6,7 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.request import Request, urlopen
 
 from backend.repository import (
@@ -152,6 +152,16 @@ class CancelledShareTests(unittest.TestCase):
         self.assertEqual(result["removed_sources"], 1)
         client.search.assert_not_called()
         client.imdb_fallback.assert_not_called()
+
+    def test_recognition_can_skip_share_validation(self):
+        link_tmdb(self.mid, {"tmdb_id": 7, "media_type": "movie", "title": "Film"}, 1, "manual", self.db)
+        self.mark_cancelled()
+        with patch("backend.tmdb.cleanup_cancelled_shares") as cleanup:
+            result = search_media(self.mid, db_path=self.db, client=TmdbClient(api_key="test"), check_share=False)
+
+        self.assertEqual(result["status"], "matched")
+        cleanup.assert_not_called()
+        self.assertEqual(get_media(self.mid, self.db)["source_count"], 1)
 
     def test_bulk_matching_counts_removals_not_errors(self):
         self.mark_cancelled()

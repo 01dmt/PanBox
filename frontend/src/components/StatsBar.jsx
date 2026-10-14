@@ -1,8 +1,15 @@
 import { CheckCircle2, CircleHelp, Film, Link2, Layers3 } from "lucide-react";
 import { formatNumber } from "../lib/format";
 
+function providerSummary(stats, providerOptions) {
+  const counts = new Map((stats?.sources?.providers || []).map((provider) => [provider.id, provider.count]));
+  const providers = providerOptions?.length
+    ? providerOptions.map((provider) => ({ ...provider, count: counts.get(provider.id) || 0 }))
+    : (stats?.sources?.providers || []);
+  return providers.map((provider) => `${provider.label || provider.id} ${formatNumber(provider.count)}`).join(" · ");
+}
 
-export default function StatsBar({ stats, activeView }) {
+export default function StatsBar({ stats, activeView, providerOptions }) {
   const values = [
     {
       label: activeView === "library" ? "有资源作品" : "全部作品",
@@ -14,7 +21,7 @@ export default function StatsBar({ stats, activeView }) {
     {
       label: "来源记录",
       value: stats?.sources?.total,
-      meta: `115 ${formatNumber(stats?.sources?.share_115)} · ED2K ${formatNumber(stats?.sources?.ed2k)}`,
+      meta: providerSummary(stats, providerOptions),
       icon: Link2,
       tone: "blue",
     },

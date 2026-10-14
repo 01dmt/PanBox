@@ -63,7 +63,7 @@ export function displayStatus(value) {
 export function maskedSource(value) {
   if (!value) return "";
   if (value.startsWith("ed2k://")) return value;
-  return value.replace(/([?&]password=)[^&#\s]+/i, "$1••••");
+  return value.replace(/([?&](?:password|pwd|code)=)[^&#\s]+/i, "$1••••");
 }
 
 export function qualityList(value) {
