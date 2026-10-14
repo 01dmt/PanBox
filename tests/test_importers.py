@@ -6,9 +6,12 @@ import unittest
 from pathlib import Path
 
 from backend.importers import (
+    detect_source_kind,
+    extract_quality_tags,
     extract_tmdb_ids,
     iter_ed2k_sources,
     iter_share_sources,
+    iter_sources,
     parse_ed2k_link,
     parse_release_aliases,
     parse_release_title,
@@ -221,6 +224,118 @@ class ImporterTests(unittest.TestCase):
             item = get_media(list_media(db_path=db_path)["items"][0]["id"], db_path)
 
         self.assertEqual((item["sources"][0]["season"], item["sources"][0]["season_end"]), (1, 3))
+
+    def test_parses_chinese_complete_season_total(self) -> None:
+        source = parse_share_line(
+            "神探夏洛克 (2010) 神探夏洛克 全4季\thttps://115cdn.com/s/sherlock?password=x#"
+        )
+        self.assertEqual((source.title, source.year, source.media_type), ("神探夏洛克", 2010, "tv"))
+        self.assertEqual((source.season, source.season_end, source.episode), (1, 4, None))
+        self.assertEqual(source.metadata["season_range"], [1, 4])
+
+    def test_parses_chinese_season_variants(self) -> None:
+        shared = parse_share_line("某剧 (2020) 共3季\thttps://115cdn.com/s/a?password=x#")
+        self.assertEqual((shared.season, shared.season_end), (1, 3))
+        span = parse_share_line("某剧 (2020) 第2-5季\thttps://115cdn.com/s/b?password=x#")
+        self.assertEqual((span.season, span.season_end), (2, 5))
+        single = parse_share_line("某剧 (2020) 全1季\thttps://115cdn.com/s/c?password=x#")
+        self.assertEqual((single.season, single.season_end), (1, None))
+
+    def test_persists_chinese_season_total_in_source_record(self) -> None:
+        content = "神探夏洛克 (2010) 神探夏洛克 全4季\thttps://115cdn.com/s/sherlock?password=x#"
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "media.db"
+            import_content(content, "sherlock.txt", db_path=db_path)
+            item = get_media(list_media(db_path=db_path)["items"][0]["id"], db_path)
+
+        self.assertEqual((item["sources"][0]["season"], item["sources"][0]["season_end"]), (1, 4))
+
+    def test_parses_chinese_episode_span(self) -> None:
+        source = parse_share_line("🎬 魅影神捕 (2026) 1-25集\thttps://115cdn.com/s/a?password=x#")
+        self.assertEqual((source.title, source.year, source.media_type), ("魅影神捕", 2026, "tv"))
+        self.assertEqual((source.season, source.episode), (1, 1))
+        self.assertEqual(source.metadata["episode_range"], [1, 25])
+
+    def test_parses_four_digit_episode_spans(self) -> None:
+        source = parse_share_line("🎬 名侦探柯南：犯人犯泽先生 (2022) TV版1-1275集\thttps://115cdn.com/s/a?password=x#")
+        self.assertEqual((source.title, source.season, source.episode), ("名侦探柯南：犯人犯泽先生", 1, 1))
+        self.assertEqual(source.metadata["episode_range"], [1, 1275])
+
+    def test_chinese_season_number_keeps_its_season(self) -> None:
+        source = parse_share_line("🎬 诛仙合集篇 (2025) 诛仙第四季1~8集\thttps://115cdn.com/s/b?password=x#")
+        self.assertEqual((source.title, source.season, source.episode), ("诛仙合集篇", 4, 1))
+        self.assertEqual(source.metadata["episode_range"], [1, 8])
+
+    def test_single_episode_and_movie_ignore_episode_spans(self) -> None:
+        episode = parse_share_line("📺 征途 (2026) S01E14 4K\thttps://115cdn.com/s/c?password=x#")
+        self.assertEqual((episode.season, episode.episode), (1, 14))
+        self.assertIsNone(episode.metadata.get("episode_range"))
+        movie = parse_share_line("🎬 一般电影 (2026)\thttps://115cdn.com/s/d?password=x#")
+        self.assertEqual((movie.media_type, movie.season, movie.episode), ("movie", None, None))
+
+    def test_parses_arabic_season_and_update_progress(self) -> None:
+        growing = parse_share_line("📺 魅影神捕 (2026) 第1季 更新至第17集\thttps://115cdn.com/s/a?password=x#")
+        self.assertEqual((growing.title, growing.season, growing.episode), ("魅影神捕", 1, 1))
+        self.assertEqual(growing.metadata["episode_range"], [1, 17])
+        single = parse_share_line("🎬 我不是大师 (2026) 第19集\thttps://115cdn.com/s/b?password=x#")
+        self.assertEqual((single.season, single.episode), (1, 19))
+        self.assertIsNone(single.metadata.get("episode_range"))
+
+    def test_progress_of_a_later_season_is_metadata_not_this_season_episodes(self) -> None:
+        source = parse_share_line("📺 唐朝诡事录 (2022) 共4季 第4季更新至第21集\thttps://115cdn.com/s/c?password=x#")
+        self.assertEqual((source.season, source.season_end, source.episode), (1, 4, None))
+        self.assertEqual(source.metadata["latest_episode"], {"season": 4, "episode": 21})
+        self.assertIsNone(source.metadata.get("episode_range"))
+
+    def test_extracts_tmdb_ids_from_official_links(self) -> None:
+        self.assertEqual(extract_tmdb_ids("https://www.themoviedb.org/tv/282326"), [282326])
+        self.assertEqual(
+            extract_tmdb_ids("⭐️ TMDB评分：6.8/10 https://www.themoviedb.org/movie/1381078?language=zh-CN"),
+            [1381078],
+        )
+        self.assertEqual(extract_tmdb_ids("{tmdbid=289078} 和 https://www.themoviedb.org/tv/282326"), [289078, 282326])
+
+    def test_attaches_message_level_tmdb_id_and_quality_tags(self) -> None:
+        message = (
+            "📺 剧集：兰香如故 (2026) S01E40\n"
+            "🎞 版本：2160p TX.WEB-DL H.265 DDP 5.1\n"
+            "🔗 链接：点击保存到123云盘 https://www.123865.com/s/Oqtgvd-XY9hh?pwd=YSRG\n"
+            "⭐️ TMDB评分：6.8/10 https://www.themoviedb.org/tv/282326"
+        )
+        source = next(iter(iter_sources(message, detect_source_kind(message))))
+        self.assertEqual(source.metadata["explicit_tmdb_ids"], [282326])
+        self.assertEqual(source.metadata["quality_tags"], ["2160p", "WEB-DL", "H.265", "DDP5.1"])
+        self.assertEqual((source.quality, source.codec, source.audio), ("2160P", "H.265", "DDP5.1"))
+
+    def test_extracts_quality_tags_from_headings(self) -> None:
+        self.assertEqual(
+            extract_quality_tags("🎬 神探夏洛克 (2010) 全4季 蓝光原盘REMUX DIY原盘中字"),
+            ["蓝光", "原盘", "REMUX"],
+        )
+        self.assertEqual(extract_quality_tags("🎬 野狗骨头[全32集][臻享超高清]"), ["超高清"])
+        self.assertIn("Dolby Vision", extract_quality_tags("2160p WEB-DL Dolby Vision H.265 DDP5.1 Atmos"))
+        self.assertEqual(extract_quality_tags("🎬 普通电影 (2026)"), [])
+
+    def test_chinese_carrier_words_fill_the_quality_tier(self) -> None:
+        bluray = parse_share_line("🎬 神探夏洛克 (2010) 全4季 蓝光原盘REMUX\thttps://115cdn.com/s/a?password=x#")
+        self.assertEqual(bluray.quality, "1080P")
+        self.assertEqual(bluray.metadata["quality_tags"], ["蓝光", "原盘", "REMUX"])
+        uhd = parse_share_line("🎬 某片 (2000) [美版UHD原盘].iso\thttps://115cdn.com/s/b?password=x#")
+        self.assertEqual((uhd.quality, uhd.metadata["quality_tags"]), ("2160P", ["UHD", "原盘"]))
+        # 「臻享超高清」只作为标签，不猜分级。
+        vague = parse_share_line("🎬 野狗骨头 (2026) [全32集][臻享超高清]\thttps://115cdn.com/s/c?password=x#")
+        self.assertIsNone(vague.quality)
+        self.assertEqual(vague.metadata["quality_tags"], ["超高清"])
+
+    def test_bare_number_span_is_only_a_fallback_after_the_title_year(self) -> None:
+        fallback = parse_share_line("🎬 兰香如故 (2026) 1-41\thttps://115cdn.com/s/a?password=x#")
+        self.assertEqual((fallback.season, fallback.episode), (1, 1))
+        self.assertEqual(fallback.metadata["episode_range"], [1, 41])
+        # 已有季标记或区间不在年份之后时，备用方案不生效。
+        self.assertIsNone(parse_share_line("🎬 某剧 (2020) 第1季 1-41\thttps://115cdn.com/s/b?password=x#").metadata.get("episode_range"))
+        misplaced = parse_share_line("🎬 某剧 (2020) 中字 1-41\thttps://115cdn.com/s/c?password=x#")
+        self.assertIsNone(misplaced.metadata.get("episode_range"))
+        self.assertIsNone(misplaced.episode)
 
     def test_extracts_multiple_ed2k_links_from_one_line(self) -> None:
         content = (

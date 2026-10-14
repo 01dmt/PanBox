@@ -194,6 +194,13 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(_format_ingestion_episode_labels([
             {"season": 1, "episode": None, "season_range": [1, 3]},
         ]), ["S1-S3"])
+        self.assertEqual(_format_ingestion_episode_labels([
+            {"season": 1, "episode": 1, "episode_range": [1, 25]},
+        ]), ["S01E01-E25"])
+        self.assertEqual(_format_ingestion_episode_labels([
+            {"season": 1, "episode": 1, "episode_range": [1, 25]},
+            {"season": 2, "episode": 4},
+        ]), ["S01E01-E25", "S02E04"])
 
     def test_ingestion_records_can_filter_by_status(self) -> None:
         ok = receive(

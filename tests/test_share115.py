@@ -163,6 +163,23 @@ class Share115Tests(unittest.TestCase):
         self.assertEqual(context.titles, ["精英之王"])
         self.assertIn(2022, context.years)
 
+    def test_message_level_tmdb_id_becomes_an_explicit_recognition_id(self) -> None:
+        context = collect_search_context(
+            {
+                "title": "兰香如故",
+                "year": 2026,
+                "media_type": "tv",
+                "sources": [
+                    {
+                        "raw_label": "兰香如故",
+                        "parsed_year": 2026,
+                        "metadata_json": '{"explicit_tmdb_ids": [282326], "quality_tags": ["2160p", "WEB-DL"]}',
+                    }
+                ],
+            }
+        )
+        self.assertEqual(context.explicit_tmdb_ids, [282326])
+
     def test_recognition_never_fetches_115_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "media.db"

@@ -291,6 +291,12 @@ export default function App() {
     setMobileInspectorOpen(false);
   }, []);
 
+  const handleSearch = useCallback((value) => {
+    setSearch(value);
+    setFilters((current) => (current.page === 1 ? current : { ...current, page: 1 }));
+    setResourceFilters((current) => (current.page === 1 ? current : { ...current, page: 1 }));
+  }, []);
+
   const changeResourceFilters = useCallback((patch) => {
     setResourceFilters((current) => ({ ...current, ...patch, page: patch.page ?? 1 }));
     setMobileInspectorOpen(false);
@@ -495,11 +501,7 @@ export default function App() {
         {view !== "library" && <Topbar
           view={view}
           search={search}
-          onSearch={(value) => {
-            setSearch(value);
-            setFilters((current) => (current.page === 1 ? current : { ...current, page: 1 }));
-            setResourceFilters((current) => (current.page === 1 ? current : { ...current, page: 1 }));
-          }}
+          onSearch={handleSearch}
           onSubmitSearch={() => {
             setSearch(search.trim());
             setFilters((current) => ({ ...current, page: 1 }));
@@ -531,7 +533,7 @@ export default function App() {
         {view === "library" ? (
           <main className="cinematic-library">
             <LibraryHero item={pageData.items.find((item) => item.backdrop_path) || pageData.items[0]} onOpen={(id) => { selectItem(id); setMobileInspectorOpen(true); }} />
-            <CinematicFilters filters={filters} options={filterOptions} total={pageData.total} onChange={changeFilters} onReset={clearFilters} onMore={() => changeFilters({})} />
+            <CinematicFilters filters={filters} options={filterOptions} total={pageData.total} search={search} onChange={changeFilters} onSearch={handleSearch} onReset={clearFilters} onMore={() => changeFilters({})} />
             <CinematicPosterGrid items={pageData.items} loading={loading} selectedId={selectedId} onSelect={(id) => { selectItem(id); setMobileInspectorOpen(true); }} page={pageData.page} pages={pageData.pages} total={pageData.total} pageSize={filters.pageSize} onPageChange={(page) => changeFilters({ page })} onPageSizeChange={(pageSize) => changeFilters({ pageSize })} onClearFilters={clearFilters} />
             {mobileInspectorOpen && <div className="cinema-drawer-backdrop" onClick={() => setMobileInspectorOpen(false)} />}
             <div className={`cinema-drawer ${mobileInspectorOpen ? "open" : ""}`}><Inspector readOnly item={selectedItem} sourceIds={pageData.items.find((item) => item.id === selectedId)?.matched_source_ids} loading={detailLoading} tmdbConfigured={Boolean(config?.tmdb_configured)} mobileOpen={mobileInspectorOpen} onClose={() => setMobileInspectorOpen(false)} onSearch={handleSearchCandidates} onLink={handleLink} onReject={handleReject} onUnlink={handleUnlink} onUpdate={handleUpdate} /></div>

@@ -49,7 +49,12 @@ def _summary(row):
     PanBox relies on what the ingested message provided.
     """
     metadata = json_object(row['metadata_json'])
-    return {'total_size': row['file_size'], 'media_info': redact(metadata.get('media_info'))}
+    tags = metadata.get('quality_tags')
+    return {
+        'total_size': row['file_size'],
+        'media_info': redact(metadata.get('media_info')),
+        'quality_tags': [str(tag) for tag in tags if isinstance(tag, str)] if isinstance(tags, list) else [],
+    }
 
 
 def _present(row):

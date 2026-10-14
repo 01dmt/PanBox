@@ -46,9 +46,29 @@ SHARE_AUDIO_RE = re.compile(
     r"(?:\s*([0-9]+)(?:[.\s]+([0-9]+))?)?(?:[.\s]*(Atmos))?\b"
 )
 SHARE_EPISODE_RE = re.compile(r"(?i)\bS(\d{1,2})\s*E(\d{1,3})\b")
-SHARE_EPISODE_RANGE_RE = re.compile(r"(?i)\bE(\d{1,3})\s*[-~]\s*E(\d{1,3})\b")
+SHARE_EPISODE_RANGE_RE = re.compile(r"(?i)\bE(\d{1,3})\s*[-~]\s*E(\d{1,4})\b")
+# 「1-25集」「第3-18集」等同于 E01-E25；「全25集」表示第 1 到第 25 集（长番可到 4 位）。
+SHARE_EPISODE_SPAN_RE = re.compile(r"第?\s*(\d{1,4})\s*[-~至到]\s*(\d{1,4})\s*集")
+SHARE_EPISODE_TOTAL_RE = re.compile(r"全\s*(\d{1,4})\s*集")
+# 「第四季」这类中文数字季号，避免有季号却回落到第 1 季。
+CHINESE_SEASON_RE = re.compile(r"第\s*([一二三四五六七八九十]{1,3})\s*季")
 SHARE_SEASON_RANGE_RE = re.compile(r"(?i)\bS(\d{1,2})\s*[-~]\s*S?(\d{1,2})(?=$|\D)")
 SHARE_SEASON_RE = re.compile(r"(?i)\bS(\d{1,2})\b")
+# 「全4季」「共4季」表示第 1 季到第 N 季；「第2-5季」给出明确的起止季。
+SHARE_SEASON_TOTAL_RE = re.compile(r"全\s*(\d{1,2})\s*季|共\s*(\d{1,2})\s*季")
+SHARE_SEASON_SPAN_RE = re.compile(r"第?\s*(\d{1,2})\s*[-~至到]\s*(\d{1,2})\s*季")
+# 「第1季」这类阿拉伯数字单季写法（中文数字见 CHINESE_SEASON_RE）。
+SHARE_SEASON_SINGLE_RE = re.compile(r"第\s*(\d{1,2})\s*季")
+# 「更新至第17集」表示该季目前收录 E01-E17。
+SHARE_EPISODE_PROGRESS_RE = re.compile(r"更新\s*[至到]?\s*第?\s*(\d{1,4})\s*集")
+# 「第4季更新至第21集」里的第 4 季是该区间的归属季。
+SHARE_PROGRESS_OWNER_RE = re.compile(r"第\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*季\s*更新")
+# 单独的「第19集」是单集。
+SHARE_EPISODE_SINGLE_RE = re.compile(r"第\s*(\d{1,4})\s*集")
+# 备用方案：没有任何季集标记时，只认紧跟片名年份之后的纯数字区间（如「兰香如故 (2026) 1-41」）。
+SHARE_BARE_EPISODE_SPAN_RE = re.compile(
+    r"\s*[\[\(（【]?\s*(\d{1,4})\s*[-~至到]\s*(\d{1,4})\s*(?=[\]\)）】]|$|\s|[-–—|·])"
+)
 SHARE_HEADER_YEAR_RE = re.compile(r"[\(\[（【]\s*((?:19|20)\d{2})\s*[\)\]）】]")
 SHARE_TECHNICAL_RE = re.compile(
     r"(?i)(?<!\w)(?:2160p|1080p|1080i|720p|576p|480p|4k|"
@@ -67,6 +87,49 @@ SHARE_METADATA_RE = re.compile(
 )
 ACCESS_CODE_RE = re.compile(r"(?i)(?:访问码|提取码|访问密码|密码|password|pwd)\s*[：:=\s]+([A-Za-z0-9]{2,16})")
 TMDB_ID_RE = re.compile(r"(?i)\{?\s*tmdb(?:id)?\s*[-:=：]\s*(\d+)\s*\}?")
+# 频道消息常带 TMDB 官方链接（⭐️ TMDB评分… https://www.themoviedb.org/tv/282326），
+# 它和 tmdb-xxx 简写一样是确定的身份信息。
+TMDB_URL_RE = re.compile(r"(?i)themoviedb\.org/(?:movie|tv)/(\d+)")
+# 画质/技术关键词（分辨率、动态范围、片源、编码、音轨、帧率等），用于缓存展示与检索。
+# 边界只用 ASCII 字母数字：中文与关键词紧邻时（如「原盘REMUX」）也要能命中。
+QUALITY_TAG_RULES: tuple[tuple[str, str], ...] = (
+    ("8K", r"(?i)(?<![A-Za-z0-9])8K(?![A-Za-z0-9])"),
+    ("2160p", r"(?i)(?<![A-Za-z0-9])2160[pi](?![A-Za-z0-9])"),
+    ("4K", r"(?i)(?<![A-Za-z0-9])4K(?![A-Za-z0-9])"),
+    ("1080p", r"(?i)(?<![A-Za-z0-9])1080[pi](?![A-Za-z0-9])"),
+    ("720p", r"(?i)(?<![A-Za-z0-9])720p(?![A-Za-z0-9])"),
+    ("576p", r"(?i)(?<![A-Za-z0-9])576[pi](?![A-Za-z0-9])"),
+    ("480p", r"(?i)(?<![A-Za-z0-9])480[pi](?![A-Za-z0-9])"),
+    ("UHD", r"(?i)(?<![A-Za-z0-9])(?:UHD|Ultra[ ._-]?HD)(?![A-Za-z0-9])"),
+    ("超高清", r"臻享超高清|超高清"),
+    ("高清", r"(?<!超)高清"),
+    ("蓝光", r"蓝光|Blu[ ._-]?ray"),
+    ("原盘", r"原盘|BDRemux|BDMV"),
+    ("REMUX", r"(?i)(?<![A-Za-z0-9])REMUX(?![A-Za-z0-9])"),
+    ("WEB-DL", r"(?i)WEB[._\- ]?DL"),
+    ("WEBRip", r"(?i)WEB[._\- ]?Rip"),
+    ("HDTV", r"(?i)(?<![A-Za-z0-9])HDTV(?![A-Za-z0-9])"),
+    ("H.265", r"(?i)(?<![A-Za-z0-9])(?:H[._\- ]?265|HEVC|x265)(?![A-Za-z0-9])"),
+    ("H.264", r"(?i)(?<![A-Za-z0-9])(?:H[._\- ]?264|AVC|x264)(?![A-Za-z0-9])"),
+    ("AV1", r"(?i)(?<![A-Za-z0-9])AV1(?![A-Za-z0-9])"),
+    ("Dolby Vision", r"(?i)Dolby[._\- ]?Vision|(?<![A-Za-z0-9])(?:DoVi|DV)(?![A-Za-z0-9])"),
+    ("HDR10+", r"(?i)HDR10\+|HDR10P"),
+    ("HDR10", r"(?i)(?<![A-Za-z0-9])HDR10(?!\+|P|[A-Za-z0-9])"),
+    ("HDR", r"(?i)(?<![A-Za-z0-9])HDR(?![A-Za-z0-9+])"),
+    ("SDR", r"(?i)(?<![A-Za-z0-9])SDR(?![A-Za-z0-9])"),
+    ("DDP", r"(?i)(?<![A-Za-z0-9])DDP(?:[ ._-]?([0-9]\.[0-9]))?(?![A-Za-z0-9])"),
+    ("DD", r"(?i)(?<![A-Za-z0-9])DD(?:[ ._-]?([0-9]\.[0-9]))?(?![A-Za-z0-9])"),
+    ("DTS-HD MA", r"(?i)DTS[._\- ]?HD[._\- ]?MA"),
+    ("DTS", r"(?i)(?<![A-Za-z0-9])DTS(?![A-Za-z0-9])"),
+    ("TrueHD", r"(?i)(?<![A-Za-z0-9])TrueHD(?![A-Za-z0-9])"),
+    ("Atmos", r"(?i)(?<![A-Za-z0-9])Atmos(?![A-Za-z0-9])"),
+    ("AAC", r"(?i)(?<![A-Za-z0-9])AAC(?![A-Za-z0-9])"),
+    ("FLAC", r"(?i)(?<![A-Za-z0-9])FLAC(?![A-Za-z0-9])"),
+    ("60fps", r"(?i)(?<![A-Za-z0-9])(?:60fps|60[._\- ]?FPS)(?![A-Za-z0-9])"),
+    ("IMAX", r"(?i)(?<![A-Za-z0-9])IMAX(?![A-Za-z0-9])"),
+    ("3D", r"(?i)(?<![A-Za-z0-9])3D(?![A-Za-z0-9])"),
+    ("修复版", r"AI\s*修复|修复版"),
+)
 SECONDARY_ALIAS_START_RE = re.compile(
     r"(?i)(?:^|[._\-\s])(BluRay|BDRip|DVDRip|WEB[._-]?DL|WEBRip|HDTV|REMUX)(?=$|[._\-\s])"
 )
@@ -161,11 +224,28 @@ def parse_title_year(value: str) -> tuple[str, Optional[int]]:
     return text or "未命名", year
 
 
+def _chinese_number(value: str) -> int | None:
+    """Convert ``四``/``十``/``十一``/``二十五`` to an integer, else ``None``."""
+    digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if not value or any(char not in "一二三四五六七八九十" for char in value):
+        return None
+    if value == "十":
+        return 10
+    if "十" in value:
+        tens, _, ones = value.partition("十")
+        return (digits.get(tens, 1) if tens else 1) * 10 + (digits.get(ones, 0) if ones else 0)
+    return digits.get(value) if len(value) == 1 else None
+
+
 def infer_share_media_type(title: str, extra: str) -> str:
     haystack = f"{title} {extra}"
     if re.search(r"(?i)S\d{1,2}(?:E\d{1,3})?", haystack) or re.search(r"(?i)\bE\d{1,3}\s*[-~]\s*E\d{1,3}\b", haystack):
         return "tv"
-    if re.search(r"全\s*\d+\s*集|第\s*\d+\s*季|剧集|电视剧|综艺|连续剧", haystack):
+    if re.search(
+        r"全\s*\d+\s*集|全\s*\d+\s*季|共\s*\d+\s*季|第\s*\d+\s*季|第\s*[一二三四五六七八九十]+\s*季|"
+        r"\d{1,3}\s*[-~至到]\s*\d{1,3}\s*集|剧集|电视剧|综艺|连续剧",
+        haystack,
+    ):
         return "tv"
     if "电影" in extra:
         return "movie"
@@ -226,11 +306,25 @@ def _share_heading_details(value: str) -> dict[str, object]:
     episode_match = SHARE_EPISODE_RE.search(heading)
     episode_range_match = SHARE_EPISODE_RANGE_RE.search(heading)
     season_range_match = SHARE_SEASON_RANGE_RE.search(heading)
+    season_total_match = SHARE_SEASON_TOTAL_RE.search(heading)
+    season_span_match = SHARE_SEASON_SPAN_RE.search(heading)
+    season_single_match = SHARE_SEASON_SINGLE_RE.search(heading)
+    chinese_season_match = CHINESE_SEASON_RE.search(heading)
+    episode_span_match = SHARE_EPISODE_SPAN_RE.search(heading)
+    episode_total_match = SHARE_EPISODE_TOTAL_RE.search(heading)
+    episode_progress_match = SHARE_EPISODE_PROGRESS_RE.search(heading)
+    episode_single_match = None if episode_progress_match else SHARE_EPISODE_SINGLE_RE.search(heading)
     season_match = episode_match or season_range_match or SHARE_SEASON_RE.search(heading)
     quality_match = QUALITY_RE.search(heading)
     technical_match = SHARE_TECHNICAL_RE.search(heading)
 
-    cut_points = [match.start() for match in (year_match, episode_match, quality_match, technical_match) if match]
+    cut_points = [
+        match.start() for match in
+        (year_match, episode_match, quality_match, technical_match, season_total_match, season_span_match,
+         season_single_match, chinese_season_match, episode_span_match, episode_total_match,
+         episode_progress_match, episode_single_match)
+        if match
+    ]
     title = heading[: min(cut_points)] if cut_points else heading
     title = title.strip(" \t-–—|·()（）[]【】✨") or "未命名"
     title = title.splitlines()[0].strip(" \t-–—|·()（）[]【】✨") or "未命名"
@@ -246,6 +340,65 @@ def _share_heading_details(value: str) -> dict[str, object]:
     if episode_range_match and not season_match:
         season = 1
     season_end = int(season_range_match.group(2)) if season_range_match else None
+    if season_match is None:
+        if season_span_match:
+            season = int(season_span_match.group(1))
+            season_end = int(season_span_match.group(2))
+        elif season_total_match:
+            total = int(season_total_match.group(1) or season_total_match.group(2))
+            season = 1
+            season_end = total if total > 1 else None
+        elif season_single_match:
+            season = int(season_single_match.group(1))
+        elif chinese_season_match:
+            season = _chinese_number(chinese_season_match.group(1))
+
+    # 「1-25集」「第3-18集」「全25集」「更新至第17集」都与 E01-E25 等价：
+    # 记录起始集并保留完整区间。
+    episode_range = None
+    latest_episode = None
+    if episode_range_match:
+        episode_range = [int(episode_range_match.group(1)), int(episode_range_match.group(2))]
+    elif episode_progress_match and episode_span_match is None and episode_total_match is None:
+        last = int(episode_progress_match.group(1))
+        owner = SHARE_PROGRESS_OWNER_RE.search(heading)
+        owner_season = None
+        if owner:
+            raw_owner = owner.group(1)
+            owner_season = int(raw_owner) if raw_owner.isdigit() else _chinese_number(raw_owner)
+        target = season if season is not None else (owner_season or 1)
+        if owner_season is not None and owner_season != target:
+            # 区间属于另一季（如「共4季 第4季更新至第21集」）：只留信息，不写成本季集号。
+            latest_episode = {"season": owner_season, "episode": last}
+        elif last > 1:
+            episode_range = [1, last]
+            if season is None:
+                season = target
+    elif episode_span_match:
+        first, last = int(episode_span_match.group(1)), int(episode_span_match.group(2))
+        if last > first:
+            episode_range = [first, last]
+    elif episode_total_match:
+        total = int(episode_total_match.group(1))
+        if total > 1:
+            episode_range = [1, total]
+    elif episode_single_match:
+        episode = int(episode_single_match.group(1))
+        if season is None:
+            season = 1
+    if episode_range and episode_match is None and episode_range_match is None:
+        episode = episode_range[0]
+        if season is None:
+            season = 1
+
+    # 备用方案：整行都没有季集标记时，才把紧跟年份的纯数字区间当作集数区间。
+    if episode is None and episode_range is None and latest_episode is None and year_match:
+        bare = SHARE_BARE_EPISODE_SPAN_RE.match(heading, year_match.end())
+        if bare and 1 <= int(bare.group(1)) < int(bare.group(2)) <= 2000:
+            episode_range = [int(bare.group(1)), int(bare.group(2))]
+            episode = episode_range[0]
+            if season is None:
+                season = 1
 
     audio_match = SHARE_AUDIO_RE.search(heading)
     audio = None
@@ -280,6 +433,14 @@ def _share_heading_details(value: str) -> dict[str, object]:
     if resource_kind != "media":
         media_type = "unknown"
     media_info = heading[technical_match.start() :].splitlines()[0].strip(" \t✨") if technical_match else None
+    quality_tags = extract_quality_tags(heading, media_info)
+    quality = quality_match.group(1).upper() if quality_match else None
+    if quality is None:
+        # 没写分辨率时按载体推断：UHD/4K → 2160P；蓝光原盘/REMUX → 1080P（蓝光原生分辨率）。
+        if "UHD" in quality_tags or "4K" in quality_tags:
+            quality = "2160P"
+        elif {"蓝光", "原盘", "REMUX"} & set(quality_tags):
+            quality = "1080P"
     return {
         "title": title,
         "year": year,
@@ -299,12 +460,14 @@ def _share_heading_details(value: str) -> dict[str, object]:
             if (match := re.search(pattern, heading, re.IGNORECASE))
         },
         "channel_fields": _extract_channel_fields(value),
-        "quality": quality_match.group(1).upper() if quality_match else None,
+        "quality": quality,
         "codec": codec_match.group(1).upper().replace("_", ".") if codec_match else None,
         "hdr": " + ".join(hdr_tags) if hdr_tags else None,
         "audio": audio,
         "media_info": media_info,
-        "episode_range": [int(episode_range_match.group(1)), int(episode_range_match.group(2))] if episode_range_match else None,
+        "episode_range": episode_range,
+        "latest_episode": latest_episode,
+        "quality_tags": quality_tags,
     }
 
 
@@ -404,6 +567,8 @@ def parse_share_line(
                 "context": heading,
                 "season_range": [details["season"], details["season_end"]] if details.get("season_end") else None,
                 "episode_range": details.get("episode_range"),
+                "latest_episode": details.get("latest_episode"),
+                "quality_tags": details.get("quality_tags"),
                 "media_info": details.get("media_info"),
                 "resource_kind": details.get("resource_kind"),
                 "resource_metadata": details.get("resource_metadata"),
@@ -417,6 +582,9 @@ def parse_share_line(
 
 def iter_share_sources(content: str, *, person_context: str | None = None) -> Iterator[ParsedSource]:
     lines = content.splitlines()
+    # 「⭐️ TMDB评分：6.8/10 https://www.themoviedb.org/tv/282326」这类官方链接
+    # 通常不在标题行上，按消息级提取后附给每条来源，识别时可据此按 ID 精确关联。
+    content_tmdb_ids = extract_tmdb_ids(content)
     for index, line in enumerate(lines):
         match = SHARE_URL_RE.search(line)
         if not match:
@@ -427,6 +595,9 @@ def iter_share_sources(content: str, *, person_context: str | None = None) -> It
         access_context = lines[index + 1] if index + 1 < len(lines) and ACCESS_CODE_RE.search(lines[index + 1]) else None
         parsed = parse_share_line(line, context=context, access_context=access_context)
         if parsed:
+            if content_tmdb_ids:
+                known = list(parsed.metadata.get("explicit_tmdb_ids") or [])
+                parsed.metadata["explicit_tmdb_ids"] = list(dict.fromkeys([*known, *content_tmdb_ids]))
             yield parsed
 
 
@@ -483,6 +654,7 @@ def _release_segments(value: str) -> list[str]:
     text = unquote(value).strip()
     text = SHARE_METADATA_RE.sub("", text)
     text = TMDB_ID_RE.sub("", text).strip()
+    text = TMDB_URL_RE.sub("", text).strip()
     stem = MEDIA_EXTENSION_RE.sub("", text).strip()
     segments = BILINGUAL_RELEASE_RE.split(stem, maxsplit=1)
     if len(segments) == 1:
@@ -527,7 +699,31 @@ def parse_release_aliases(value: str, *, include_secondary: bool = True) -> list
 
 
 def extract_tmdb_ids(value: str) -> list[int]:
-    return [int(match.group(1)) for match in TMDB_ID_RE.finditer(unquote(value))]
+    """Collect explicit TMDB ids from ``tmdb-123`` shorthands and official links."""
+    text = unquote(value)
+    ids = [int(match.group(1)) for match in TMDB_ID_RE.finditer(text)]
+    ids += [int(match.group(1)) for match in TMDB_URL_RE.finditer(text)]
+    return list(dict.fromkeys(ids))
+
+
+def extract_quality_tags(*values: str) -> list[str]:
+    """Return normalized technical tags (resolution, HDR, source, codec, audio)."""
+    text = " ".join(value for value in values if value)
+    if not text:
+        return []
+    tags: list[str] = []
+    for label, pattern in QUALITY_TAG_RULES:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        channels = match.group(1) if match.groups() else None
+        tag = f"{label}{channels}" if channels and label in {"DDP", "DD"} else label
+        if tag not in tags:
+            tags.append(tag)
+    # 「DTS-HD MA」已经说明音轨规格，不再重复记泛化的 DTS。
+    if "DTS-HD MA" in tags and "DTS" in tags:
+        tags.remove("DTS")
+    return tags
 
 
 def parse_ed2k_link(

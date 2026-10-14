@@ -766,8 +766,19 @@ def _format_ingestion_number_ranges(values: Iterable[int], prefix: str = "") -> 
 
 
 def _format_ingestion_episode_labels(rows: list[dict[str, Any]]) -> list[str]:
-    episodes = sorted({(int(row["season"]), int(row["episode"])) for row in rows if row.get("season") is not None and row.get("episode") is not None})
-    episode_labels = [f"S{season:02d}E{episode:02d}" for season, episode in episodes]
+    episodes: set[tuple[int, int]] = set()
+    episode_ranges: set[tuple[int, int, int]] = set()
+    for row in rows:
+        if row.get("season") is None or row.get("episode") is None:
+            continue
+        season, episode = int(row["season"]), int(row["episode"])
+        span = row.get("episode_range")
+        if isinstance(span, (list, tuple)) and len(span) == 2 and int(span[1]) > int(span[0]):
+            episode_ranges.add((season, int(span[0]), int(span[1])))
+        else:
+            episodes.add((season, episode))
+    episode_labels = [f"S{season:02d}E{first:02d}-E{last:02d}" for season, first, last in sorted(episode_ranges)]
+    episode_labels += [f"S{season:02d}E{episode:02d}" for season, episode in sorted(episodes)]
     season_ranges = set()
     covered_seasons = set()
     for row in rows:
@@ -778,7 +789,7 @@ def _format_ingestion_episode_labels(rows: list[dict[str, Any]]) -> list[str]:
                 season_ranges.add((start, end))
                 covered_seasons.update(range(start, end + 1))
     season_only = {int(row["season"]) for row in rows if row.get("season") is not None and row.get("episode") is None} - covered_seasons
-    episode_seasons = {season for season, _ in episodes}
+    episode_seasons = {season for season, _ in episodes} | {season for season, _, _ in episode_ranges}
     season_labels = [f"S{start}-S{end}" for start, end in sorted(season_ranges)]
     season_labels.extend(_format_ingestion_number_ranges(season_only - episode_seasons, prefix="S"))
     return episode_labels + season_labels
@@ -882,6 +893,7 @@ def list_ingestion_records(
             "season": link["season"],
             "episode": link["episode"],
             "season_range": source_metadata.get("season_range"),
+            "episode_range": source_metadata.get("episode_range"),
         })
 
     items = []

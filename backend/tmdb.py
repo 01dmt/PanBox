@@ -365,6 +365,15 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
             # snapshots are no longer collected because fetching a 115
             # directory costs many requests per share.
             add_value(metadata.get("extra"), source_year)
+            # TMDB 官方链接与 tmdb-xxx 简写在入库时已固化为显式 ID。
+            for value in metadata.get("explicit_tmdb_ids") or ():
+                try:
+                    tmdb_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if tmdb_id not in seen_ids:
+                    seen_ids.add(tmdb_id)
+                    explicit_ids.append(tmdb_id)
 
     return SearchContext(
         terms=terms,
