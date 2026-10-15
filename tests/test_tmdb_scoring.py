@@ -663,6 +663,112 @@ class TmdbScoringTests(unittest.TestCase):
         self.assertEqual(candidates[0]["tmdb_id"], 777)
         self.assertTrue(any(params.get("include_adult") == "true" for _, params in client.calls))
 
+    def test_explicit_id_candidate_survives_a_year_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "media.db"
+            import_content(
+                "诛仙合集篇 (2025)\n🔗 https://www.123865.com/s/abc?pwd=x\n"
+                "⭐️ TMDB评分：7.4/10 https://www.themoviedb.org/tv/206484",
+                "collection.txt",
+                db_path=db,
+            )
+            mid = list_media(db_path=db)["items"][0]["id"]
+
+            def respond(path, params):
+                if path == "/tv/206484":
+                    return {"id": 206484, "name": "诛仙", "media_type": "tv", "first_air_date": "2022-08-02",
+                            "number_of_seasons": 1, "seasons": [{"season_number": 1, "episode_count": 26}]}
+                return {"results": []}
+
+            candidates = FakeTmdbClient(respond).search(get_media(mid, db))
+            explicit = [candidate for candidate in candidates if candidate["tmdb_id"] == 206484]
+            # 年份对不上也要留下原文给出的显式候选（年份冲突只阻止自动关联）。
+            self.assertEqual(len(explicit), 1)
+            self.assertTrue(explicit[0]["match_evidence"]["explicit_tmdb_id"])
+            self.assertTrue(explicit[0]["match_evidence"]["year_conflict"])
+            self.assertFalse(should_auto_link(candidates))
+
+    def test_explicit_id_breaks_an_otherwise_ambiguous_tie(self) -> None:
+        base = {
+            "media_type": "tv", "score": 0.99, "title": "一念永恒", "first_air_date": "2020-08-12",
+            "match_evidence": {"title_exact": True, "primary_title_exact": True},
+        }
+        ambiguous = [
+            {**base, "tmdb_id": 331477, "match_evidence": {**base["match_evidence"], "explicit_tmdb_id": True}},
+            {**base, "tmdb_id": 107371},
+        ]
+        self.assertTrue(should_auto_link(ambiguous))
+        # 没有显式 ID 时，同名条目的平局仍然停在待确认。
+        self.assertFalse(should_auto_link([ambiguous[1], {**base, "tmdb_id": 999}]))
+
+    def test_official_tmdb_link_type_is_requested_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "media.db"
+            import_content(
+                "兰香如故 (2026) S01E40\n🔗 https://www.123865.com/s/abc?pwd=x\n"
+                "⭐️ TMDB评分：6.8/10 https://www.themoviedb.org/tv/282326",
+                "official-link.txt",
+                db_path=db,
+            )
+            mid = list_media(db_path=db)["items"][0]["id"]
+
+            def respond(path, params):
+                if path == "/tv/282326":
+                    return {"id": 282326, "name": "兰香如故", "media_type": "tv", "first_air_date": "2026-01-01",
+                            "number_of_seasons": 1, "seasons": [{"season_number": 1, "episode_count": 40}]}
+                return {"results": []}
+
+            client = FakeTmdbClient(respond)
+            result = search_media(mid, auto_link=True, db_path=db, client=client)
+            # 官方链接里的 /tv/ 直接决定请求类型，不再先试 /movie/。
+            self.assertEqual(client.calls[0][0], "/tv/282326")
+            self.assertEqual(result["status"], "matched")
+
+    def test_tv_match_without_season_episode_stays_for_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "media.db"
+            import_content(
+                "逆天邪神 (2023)\n🔗 https://www.123865.com/s/abc?pwd=x\n"
+                "⭐️ TMDB评分：8/10 https://www.themoviedb.org/tv/235643",
+                "no-episode.txt",
+                db_path=db,
+            )
+            mid = list_media(db_path=db)["items"][0]["id"]
+
+            def respond(path, params):
+                if path == "/tv/235643":
+                    return {"id": 235643, "name": "逆天邪神", "media_type": "tv", "first_air_date": "2023-12-01",
+                            "number_of_seasons": 1, "seasons": [{"season_number": 1, "episode_count": 12}]}
+                return {"results": []}
+
+            result = search_media(mid, auto_link=True, db_path=db, client=FakeTmdbClient(respond))
+            item = get_media(mid, db)
+            # 资源已经入库，但没有季集线索：停在待确认并保留候选，方便人工核对覆盖范围。
+            self.assertEqual(result["status"], "review")
+            self.assertEqual(item["tmdb_status"], "review")
+            self.assertEqual([candidate["tmdb_id"] for candidate in item["candidates"]], [235643])
+            self.assertEqual(len(item["sources"]), 1)
+
+    def test_movie_match_without_season_episode_still_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "media.db"
+            import_content(
+                "无名之辈 (2018)\n🔗 https://www.123865.com/s/abc?pwd=x\n"
+                "⭐️ TMDB评分：7.0/10 https://www.themoviedb.org/movie/1381078",
+                "movie-link.txt",
+                db_path=db,
+            )
+            mid = list_media(db_path=db)["items"][0]["id"]
+
+            def respond(path, params):
+                if path == "/movie/1381078":
+                    return {"id": 1381078, "title": "无名之辈", "media_type": "movie", "release_date": "2018-11-16"}
+                return {"results": []}
+
+            result = search_media(mid, auto_link=True, db_path=db, client=FakeTmdbClient(respond))
+            self.assertEqual(result["status"], "matched")
+            self.assertEqual(get_media(mid, db)["tmdb_id"], 1381078)
+
 
 if __name__ == "__main__":
     unittest.main()

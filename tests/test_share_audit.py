@@ -108,6 +108,36 @@ class ShareAuditTests(unittest.TestCase):
         self.assertNotIn("https://", audit_path(self.db).read_text())
         self.assertNotIn("queue", result)
 
+    def test_imported_scope_skips_links_validated_during_ingestion(self):
+        with connect(self.db) as db:
+            source_key = db.execute("SELECT source_key FROM source_records ORDER BY id LIMIT 1").fetchone()[0]
+            db.execute(
+                """INSERT INTO ingestion_events (id, event_id, service, raw_text, status, received_at)
+                   VALUES ('evt-1', 'evt-1', 'test', 'First (2025) https://115.com/s/a', 'imported', '2026-01-01T00:00:00+00:00')"""
+            )
+            db.execute(
+                """INSERT INTO ingestion_links (ingestion_id, source_key, provider, source_type, url)
+                   VALUES ('evt-1', ?, '115', '115', 'https://115.com/s/a')""",
+                (source_key,),
+            )
+        client = self.client([None])
+        result = self.run_audit(client, imported_only=True)
+        self.assertEqual((result["scope"], result["total"], result["processed"]), ("imported", 1, 1))
+        self.assertEqual(client.probe_share.call_count, 1)
+
+    def test_successful_probe_writes_back_availability(self):
+        result = self.run_audit(self.client([None, None]))
+        self.assertEqual((result["status"], result["available"]), ("complete", 2))
+        with connect(self.db) as db:
+            rows = db.execute(
+                "SELECT availability_status, last_checked_at, last_check_error FROM source_records"
+            ).fetchall()
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["availability_status"], "available")
+            self.assertTrue(row["last_checked_at"])
+            self.assertIsNone(row["last_check_error"])
+
     def test_risk_stops_immediately_without_deleting_or_overwriting_snapshot(self):
         metadata = json.dumps({"share_snapshot": {"version": 2, "status": "ok", "names": ["kept"]}})
         with connect(self.db) as db:

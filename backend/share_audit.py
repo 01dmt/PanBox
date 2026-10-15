@@ -49,6 +49,7 @@ def pause_audit(db_path: str | Path | None = None) -> None:
 def audit_share_links(
     db_path: str | Path | None = None, *, resume: bool = False,
     client: Share115Client | None = None, batch_size: int = 100, cooldown: float = 120,
+    imported_only: bool = False,
 ) -> dict[str, Any]:
     db_path = resolve_db_path(db_path)
     path = audit_path(db_path)
@@ -74,7 +75,11 @@ def audit_share_links(
             groups: dict[tuple[str, str], list[int]] = {}
             with connect(db_path) as db:
                 # Cover confirmed and pending media, while checking each shared URL identity once.
-                rows = db.execute("SELECT id, url FROM source_records WHERE source_type='115' ORDER BY id").fetchall()
+                query = "SELECT id, url FROM source_records WHERE source_type='115'"
+                if imported_only:
+                    # 只校验批量导入（app.py import）的来源；webhook 来源在入库时已校验过。
+                    query += " AND source_key NOT IN (SELECT source_key FROM ingestion_links)"
+                rows = db.execute(f"{query} ORDER BY id").fetchall()
                 for row in rows:
                     try:
                         key = parse_share_url(row["url"])
@@ -90,6 +95,7 @@ def audit_share_links(
                 "available": 0, "protected": 0, "removed": 0, "media_removed": 0,
                 "skipped": 0, "queue": list(groups.values()), "requests": 0,
                 "interval_seconds": 5, "batch_size": batch_size, "cooldown_seconds": cooldown,
+                "scope": "imported" if imported_only else "all",
             }
         pause_path.unlink(missing_ok=True)
         state.update(status="running", reason=None, last_error_errno=None, pid=os.getpid(), updated_at=utc_now())
@@ -126,6 +132,14 @@ def audit_share_links(
                         try:
                             share_client.probe_share(rows[0]["url"])
                             state["available"] += 1
+                            # 探针成功即写回可用状态和检查时间，界面可见“已验证可用”。
+                            with connect(db_path) as db:
+                                now = utc_now()
+                                for row in related:
+                                    db.execute(
+                                        "UPDATE source_records SET availability_status='available', last_checked_at=?, last_check_error=NULL WHERE id=?",
+                                        (now, row["id"]),
+                                    )
                         except Share115Error as exc:
                             if exc.risk_control or exc.errno not in {*INVALID_SHARE_ERRNOS, *UNAVAILABLE_ERRNOS}:
                                 state.update(

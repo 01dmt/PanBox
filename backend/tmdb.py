@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .importers import (
-    extract_tmdb_ids, is_search_title, normalize_title, parse_release_aliases,
+    extract_tmdb_ids, extract_tmdb_targets, is_search_title, normalize_title, parse_release_aliases,
     parse_release_title, parse_title_year, split_joined_title,
     SEASON_EPISODE_RE, SEASON_RE,
 )
@@ -72,9 +72,14 @@ def dated_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def matching_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    candidates = [c for c in dated_candidates(candidates) if not any(
-        (c.get("match_evidence") or {}).get(key) for key in ("year_conflict", "resource_type_conflict")
-    )]
+    def usable(candidate: dict[str, Any]) -> bool:
+        evidence = candidate.get("match_evidence") or {}
+        if evidence.get("resource_type_conflict"):
+            return False
+        # 显式 ID 来自消息原文：年份对不上也保留为候选，year_conflict 本身会阻止自动关联。
+        return not (evidence.get("year_conflict") and not evidence.get("explicit_tmdb_id"))
+
+    candidates = [candidate for candidate in dated_candidates(candidates) if usable(candidate)]
     localized_groups = set()
     for candidate in candidates:
         title = candidate.get("title") or ""
@@ -209,6 +214,7 @@ class SearchContext:
     titles: list[str]
     years: list[int]
     explicit_tmdb_ids: list[int]
+    explicit_tmdb_types: dict[int, str] = field(default_factory=dict)
     episodic: bool = False
     resource_groups: list[list[str]] = field(default_factory=list)
     resource_kind: str = "unknown"
@@ -255,6 +261,8 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
     titles: list[str] = []
     years: list[int] = []
     explicit_ids: list[int] = []
+    # TMDB 官方链接给出的媒体类型（/movie/ 或 /tv/），用于直接请求对应类型的详情。
+    explicit_types: dict[int, str] = {}
     seen_terms: set[tuple[str, int | None]] = set()
     seen_titles: set[str] = set()
     seen_years: set[int] = set()
@@ -285,16 +293,22 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
             seen_years.add(year)
             years.append(year)
 
+    def remember_targets(value: str) -> None:
+        """Collect explicit TMDB targets, keeping the type given by official links."""
+        for tmdb_id, media_type in extract_tmdb_targets(value):
+            if tmdb_id not in seen_ids:
+                seen_ids.add(tmdb_id)
+                explicit_ids.append(tmdb_id)
+            if media_type:
+                explicit_types[tmdb_id] = media_type
+
     def add_value(value: Any, year_hint: Any = None, *, label: bool = False) -> None:
         nonlocal episodic
         if not isinstance(value, str) or not value.strip():
             return
         if not label and (SEASON_EPISODE_RE.search(value) or SEASON_RE.search(value)):
             episodic = True
-        for tmdb_id in extract_tmdb_ids(value):
-            if tmdb_id not in seen_ids:
-                seen_ids.add(tmdb_id)
-                explicit_ids.append(tmdb_id)
+        remember_targets(value)
 
         # A library label is already a title: digits in "Cold War 1994" are not a release year.
         parsed_title, parsed_year = parse_title_year(value) if label else parse_release_title(value)
@@ -323,10 +337,7 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
         raw_text = source.get("raw_text")
         if not isinstance(raw_text, str):
             continue
-        for tmdb_id in extract_tmdb_ids(raw_text):
-            if tmdb_id not in seen_ids:
-                seen_ids.add(tmdb_id)
-                explicit_ids.append(tmdb_id)
+        remember_targets(raw_text)
         match = channel_heading.search(raw_text)
         if match:
             add_value(f"{match.group(1).strip()} ({match.group(2)})", label=True)
@@ -349,10 +360,7 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
         add_value(source.get("raw_label"), source_year, label=source.get("source_type") != "ed2k")
         raw_text = source.get("raw_text")
         if isinstance(raw_text, str):
-            for tmdb_id in extract_tmdb_ids(raw_text):
-                if tmdb_id not in seen_ids:
-                    seen_ids.add(tmdb_id)
-                    explicit_ids.append(tmdb_id)
+            remember_targets(raw_text)
 
         metadata = source.get("metadata_json")
         if isinstance(metadata, str) and metadata:
@@ -365,7 +373,19 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
             # snapshots are no longer collected because fetching a 115
             # directory costs many requests per share.
             add_value(metadata.get("extra"), source_year)
-            # TMDB 官方链接与 tmdb-xxx 简写在入库时已固化为显式 ID。
+            # TMDB 官方链接与 tmdb-xxx 简写在入库时已固化为显式 ID，链接还给出媒体类型。
+            for entry in metadata.get("explicit_tmdb") or ():
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    tmdb_id = int(entry.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                if tmdb_id not in seen_ids:
+                    seen_ids.add(tmdb_id)
+                    explicit_ids.append(tmdb_id)
+                if entry.get("type"):
+                    explicit_types[tmdb_id] = str(entry["type"])
             for value in metadata.get("explicit_tmdb_ids") or ():
                 try:
                     tmdb_id = int(value)
@@ -380,6 +400,7 @@ def collect_search_context(item: dict[str, Any]) -> SearchContext:
         titles=titles,
         years=years,
         explicit_tmdb_ids=explicit_ids,
+        explicit_tmdb_types=explicit_types,
         episodic=episodic,
         resource_groups=resource_groups,
         resource_kind="tv" if resource_kinds == {"tv"} else "single_video" if resource_kinds == {"single_video"} else "unknown",
@@ -604,7 +625,9 @@ class TmdbClient:
                 return
             year = tmdb_year(result)
             if year is None or (allowed_years and year not in allowed_years):
-                return
+                # 显式 ID 来自消息原文：即使年份对不上也保留为候选，年份冲突会阻止自动关联。
+                if not explicit_match:
+                    return
             key = (result_type, int(result["id"]))
             entry = entries.setdefault(
                 key,
@@ -684,7 +707,12 @@ class TmdbClient:
             return candidates
 
         for tmdb_id in context.explicit_tmdb_ids:
-            type_order = [local_type, "movie", "tv"] if local_type in {"movie", "tv"} else ["movie", "tv"]
+            hinted_type = (context.explicit_tmdb_types or {}).get(tmdb_id)
+            if hinted_type:
+                # 官方链接已说明类型，直接请求该类型，省掉一次必然 404 的尝试。
+                type_order = [hinted_type]
+            else:
+                type_order = [local_type, "movie", "tv"] if local_type in {"movie", "tv"} else ["movie", "tv"]
             for candidate_type in dict.fromkeys(type_order):
                 try:
                     payload = self.request(f"/{candidate_type}/{tmdb_id}", {"language": "zh-CN"})
@@ -1081,6 +1109,27 @@ def score_candidate(
     return round(max(0.0, min(score, 0.99)), 4)
 
 
+def has_season_episode_evidence(item: dict[str, Any]) -> bool:
+    """Whether any source of this work identified a season or an episode."""
+    for source in item.get("sources") or []:
+        if source.get("season") is not None or source.get("season_end") is not None or source.get("episode") is not None:
+            return True
+        metadata = source.get("metadata_json")
+        if isinstance(metadata, str) and metadata:
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                metadata = {}
+        if isinstance(metadata, dict) and (metadata.get("episode_range") or metadata.get("latest_episode")):
+            return True
+    return False
+
+
+def needs_episode_review(item: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """TV 作品匹配到 TMDB 却没有识别到任何季/集时，先入库但停在待确认。"""
+    return candidate.get("media_type") == "tv" and not has_season_episode_evidence(item)
+
+
 def should_auto_link(candidates: list[dict[str, Any]]) -> bool:
     candidates = matching_candidates(candidates)
     if not candidates:
@@ -1091,6 +1140,9 @@ def should_auto_link(candidates: list[dict[str, Any]]) -> bool:
         return False
     if evidence.get("derived_only") and not evidence.get("title_exact"):
         return False
+    if evidence.get("explicit_tmdb_id"):
+        # 消息原文给出的 TMDB ID 就是确定身份，同名重复条目打成平手时以它为准。
+        return True
     top = top_candidate["score"]
     runner_up = candidates[1]["score"] if len(candidates) > 1 else 0.0
     gap = round(top - runner_up, 4)
@@ -1176,6 +1228,9 @@ def search_media(
 
     top = candidates[0]
     should_link = auto_link and should_auto_link(candidates)
+    if should_link and needs_episode_review(item, top):
+        # 资源已正常入库，但季集没有识别出来，无法确认覆盖范围：保存候选等待确认。
+        should_link = False
 
     if should_link:
         details = (normalize_details(top["payload"], top["media_type"])

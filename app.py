@@ -40,6 +40,7 @@ def parser() -> argparse.ArgumentParser:
 
     audit_command = commands.add_parser("check-shares", help="低频检查全部 115 分享，只删除确认已取消或失效的链接")
     audit_command.add_argument("--resume", action="store_true", help="从上次未完成的位置继续，不重复检查已处理链接")
+    audit_command.add_argument("--imported", action="store_true", help="只检查批量导入（app.py import）的来源，跳过入库时已校验的 webhook 来源")
 
     serve_command = commands.add_parser("serve", help="启动本地 Web 管理界面")
     serve_command.add_argument("--host", default=os.getenv("MEDIA_HOST", "127.0.0.1"))
@@ -74,7 +75,7 @@ def main() -> None:
         return
 
     if args.command == "check-shares":
-        print(audit_share_links(db_path, resume=args.resume))
+        print(audit_share_links(db_path, resume=args.resume, imported_only=args.imported))
         return
 
     if args.command == "serve":

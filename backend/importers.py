@@ -87,9 +87,11 @@ SHARE_METADATA_RE = re.compile(
 )
 ACCESS_CODE_RE = re.compile(r"(?i)(?:访问码|提取码|访问密码|密码|password|pwd)\s*[：:=\s]+([A-Za-z0-9]{2,16})")
 TMDB_ID_RE = re.compile(r"(?i)\{?\s*tmdb(?:id)?\s*[-:=：]\s*(\d+)\s*\}?")
+# 「{tv tmdb-206484}」这类简写也带类型提示（剧集/电影为中文别名）。
+TMDB_TYPED_ID_RE = re.compile(r"(?i)\{?\s*(movie|tv|剧集|电影)\s+tmdb(?:id)?\s*[-:=：]\s*(\d+)\s*\}?")
 # 频道消息常带 TMDB 官方链接（⭐️ TMDB评分… https://www.themoviedb.org/tv/282326），
-# 它和 tmdb-xxx 简写一样是确定的身份信息。
-TMDB_URL_RE = re.compile(r"(?i)themoviedb\.org/(?:movie|tv)/(\d+)")
+# 它和 tmdb-xxx 简写一样是确定的身份信息，链接里的 /movie|tv/ 还给出媒体类型。
+TMDB_URL_RE = re.compile(r"(?i)themoviedb\.org/(movie|tv)/(\d+)")
 # 画质/技术关键词（分辨率、动态范围、片源、编码、音轨、帧率等），用于缓存展示与检索。
 # 边界只用 ASCII 字母数字：中文与关键词紧邻时（如「原盘REMUX」）也要能命中。
 QUALITY_TAG_RULES: tuple[tuple[str, str], ...] = (
@@ -583,8 +585,8 @@ def parse_share_line(
 def iter_share_sources(content: str, *, person_context: str | None = None) -> Iterator[ParsedSource]:
     lines = content.splitlines()
     # 「⭐️ TMDB评分：6.8/10 https://www.themoviedb.org/tv/282326」这类官方链接
-    # 通常不在标题行上，按消息级提取后附给每条来源，识别时可据此按 ID 精确关联。
-    content_tmdb_ids = extract_tmdb_ids(content)
+    # 通常不在标题行上，按消息级提取后附给每条来源；链接里的 /movie|tv/ 同时给出媒体类型。
+    content_targets = extract_tmdb_targets(content)
     for index, line in enumerate(lines):
         match = SHARE_URL_RE.search(line)
         if not match:
@@ -595,9 +597,11 @@ def iter_share_sources(content: str, *, person_context: str | None = None) -> It
         access_context = lines[index + 1] if index + 1 < len(lines) and ACCESS_CODE_RE.search(lines[index + 1]) else None
         parsed = parse_share_line(line, context=context, access_context=access_context)
         if parsed:
-            if content_tmdb_ids:
-                known = list(parsed.metadata.get("explicit_tmdb_ids") or [])
-                parsed.metadata["explicit_tmdb_ids"] = list(dict.fromkeys([*known, *content_tmdb_ids]))
+            if content_targets:
+                parsed.metadata["explicit_tmdb_ids"] = list(dict.fromkeys(tmdb_id for tmdb_id, _ in content_targets))
+                parsed.metadata["explicit_tmdb"] = [
+                    {"id": tmdb_id, "type": media_type} for tmdb_id, media_type in content_targets
+                ]
             yield parsed
 
 
@@ -700,10 +704,25 @@ def parse_release_aliases(value: str, *, include_secondary: bool = True) -> list
 
 def extract_tmdb_ids(value: str) -> list[int]:
     """Collect explicit TMDB ids from ``tmdb-123`` shorthands and official links."""
+    return [tmdb_id for tmdb_id, _ in extract_tmdb_targets(value)]
+
+
+def extract_tmdb_targets(value: str) -> list[tuple[int, str | None]]:
+    """Return ``(id, type)`` pairs; the type comes from official link paths."""
     text = unquote(value)
-    ids = [int(match.group(1)) for match in TMDB_ID_RE.finditer(text)]
-    ids += [int(match.group(1)) for match in TMDB_URL_RE.finditer(text)]
-    return list(dict.fromkeys(ids))
+    found: list[tuple[int, int, str | None]] = []
+    for match in TMDB_TYPED_ID_RE.finditer(text):
+        kind = match.group(1).lower()
+        found.append((match.start(), int(match.group(2)), "tv" if kind in {"tv", "剧集"} else "movie"))
+    for match in TMDB_URL_RE.finditer(text):
+        found.append((match.start(), int(match.group(2)), match.group(1).lower()))
+    for match in TMDB_ID_RE.finditer(text):
+        found.append((match.start(), int(match.group(1)), None))
+    targets: dict[int, str | None] = {}
+    for _, tmdb_id, media_type in sorted(found):
+        if media_type or tmdb_id not in targets:
+            targets[tmdb_id] = media_type
+    return list(targets.items())
 
 
 def extract_quality_tags(*values: str) -> list[str]:
