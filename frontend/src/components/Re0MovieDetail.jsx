@@ -533,11 +533,6 @@ export default function Re0MovieDetail({
                           <strong className="re0-publisher-name">
                             {source.channel_name || PROVIDER_NAMES[providerId] || "网盘来源"}
                           </strong>
-                          {source.access_code && (
-                            <span className="re0-code-badge" title="访问提取码">
-                              提取码: {source.access_code}
-                            </span>
-                          )}
                         </div>
                         <span className="re0-publish-date">
                           {source.published_at ? `收录于 ${formatDate(source.published_at)}` : "已入库"}

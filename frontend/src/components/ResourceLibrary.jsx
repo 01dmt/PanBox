@@ -321,20 +321,11 @@ function ResourceAssetCard({
   onAction,
   onCheck,
   checkingId,
-  onCopyNotice,
 }) {
   const title = item.title || item.filename || "未命名资源";
   const facts = extractResourceFacts(item);
   const isSelected = selectedId === item.id;
   const isChecking = checkingId === item.id;
-
-  const handleCopyCode = (e) => {
-    e.stopPropagation();
-    if (item.access_code) {
-      navigator.clipboard.writeText(item.access_code);
-      onCopyNotice?.("提取码已复制");
-    }
-  };
 
   return (
     <article
@@ -355,16 +346,6 @@ function ResourceAssetCard({
           )}
         </div>
         <div className="resource-card-top-badges">
-          {item.access_code && (
-            <button
-              type="button"
-              className="resource-card-code"
-              title="点击复制访问提取码"
-              onClick={handleCopyCode}
-            >
-              <span>提取码: {item.access_code}</span>
-            </button>
-          )}
           <StatusDot status={item.availability_status} />
         </div>
       </div>
@@ -592,7 +573,7 @@ export default function ResourceLibrary({
           <p className="resource-header-desc">
             {grouped
               ? "按人物自动归类，一览全部人物创作者及其关联的跨网盘资源。"
-              : "高信息密度资产清单，一屏纵览各网盘资源、提取码、技术规格与健康状态。"}
+              : "高信息密度资产清单，一屏纵览各网盘资源、技术规格与健康状态。"}
           </p>
         </div>
         <div className="resource-header-count">
@@ -663,7 +644,6 @@ export default function ResourceLibrary({
                 onAction={onAction}
                 onCheck={onCheck}
                 checkingId={checkingId}
-                onCopyNotice={showToast}
               />
             ))}
           </div>
@@ -771,7 +751,6 @@ export function ResourceDetail({
   }, [item?.id]);
 
   const summary = item?.summary || {};
-  const accessCode = item?.access_code || item?.access_code_masked;
 
   if (!open) return null;
 
@@ -875,13 +854,6 @@ export function ResourceDetail({
                     <code>{item.url_masked || "—"}</code>
                     <CopyButton value={item.url} label="复制" />
                   </div>
-                  {accessCode && (
-                    <div className="resource-detail-link">
-                      <span>访问码</span>
-                      <code className="code-highlight">{item.access_code || item.access_code_masked}</code>
-                      <CopyButton value={item.access_code} label="复制" />
-                    </div>
-                  )}
                 </section>
 
                 {/* Status and Technical Facts */}
