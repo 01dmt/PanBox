@@ -744,7 +744,7 @@ function CopyButton({ value, label = "复制" }) {
   );
 }
 
-/* Centered Modal Dialog for Resource Inspection (Harmonious Proportions + 2-Column Layout) */
+/* Centered Modal Dialog for Resource Inspection (Clean Default + Click-to-Expand Raw Messages on Right) */
 export function ResourceDetail({
   item,
   loading,
@@ -760,12 +760,14 @@ export function ResourceDetail({
   const [tags, setTags] = useState([]);
   const [notes, setNotes] = useState("");
   const [resourceClass, setResourceClass] = useState("media");
+  const [showRaw, setShowRaw] = useState(false);
 
   useEffect(() => {
     setTags(item?.tags || []);
     setNotes(item?.notes || "");
     setResourceClass(item?.resource_class || "media");
     setEditing(false);
+    setShowRaw(false);
   }, [item?.id]);
 
   const summary = item?.summary || {};
@@ -780,7 +782,7 @@ export function ResourceDetail({
       role="presentation"
     >
       <div
-        className="resource-modal-dialog"
+        className={`resource-modal-dialog ${showRaw ? "has-raw-expanded" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="resource-modal-title"
@@ -994,65 +996,94 @@ export function ResourceDetail({
                     </div>
                   </section>
                 )}
+
+                {/* Toggle Button to Expand Raw Messages on the Right */}
+                <section className="resource-detail-section">
+                  <button
+                    type="button"
+                    className={`resource-raw-trigger-btn ${showRaw ? "active" : ""}`}
+                    onClick={() => setShowRaw(!showRaw)}
+                    title={showRaw ? "收起右侧原始消息面板" : "在右侧展开原始消息记录"}
+                  >
+                    <div className="raw-trigger-left">
+                      <FileText size={15} />
+                      <span>原始消息记录 ({item.original_messages?.length || 1})</span>
+                    </div>
+                    <span className="raw-trigger-hint">
+                      {showRaw ? "收起右侧 ✕" : "在右侧展开 →"}
+                    </span>
+                  </button>
+                </section>
               </div>
 
-              {/* Right Column: Raw Telegram Messages Expanded */}
-              <div className="resource-modal-col resource-modal-col-right">
-                <section className="resource-raw-messages-section">
-                  <div className="resource-raw-header">
-                    <div className="resource-raw-title-wrap">
-                      <FileText size={15} className="resource-raw-icon" />
-                      <h3 className="resource-section-title">原始消息记录</h3>
+              {/* Right Column: Raw Telegram Messages Expanded on Demand */}
+              {showRaw && (
+                <div className="resource-modal-col resource-modal-col-right">
+                  <section className="resource-raw-messages-section">
+                    <div className="resource-raw-header">
+                      <div className="resource-raw-title-wrap">
+                        <FileText size={15} className="resource-raw-icon" />
+                        <h3 className="resource-section-title">原始消息记录</h3>
+                        <span className="resource-raw-badge">
+                          {item.original_messages?.length ? `${item.original_messages.length} 条记录` : "1 条记录"}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="resource-raw-close-btn"
+                        onClick={() => setShowRaw(false)}
+                        title="收起右侧消息"
+                        aria-label="收起右侧原始消息"
+                      >
+                        <X size={14} />
+                      </button>
                     </div>
-                    <span className="resource-raw-badge">
-                      {item.original_messages?.length ? `${item.original_messages.length} 条记录` : "1 条记录"}
-                    </span>
-                  </div>
 
-                  <div className="resource-raw-messages-list">
-                    {item.original_messages?.length ? (
-                      item.original_messages.map((m) => (
-                        <article className="resource-raw-card" key={m.id}>
-                          <div className="resource-raw-card-head">
-                            <div className="resource-raw-channel">
-                              <strong>{m.channel_name || "未知频道"}</strong>
-                              {m.message_url && (
-                                <a
-                                  href={m.message_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="resource-raw-link"
-                                  title="在 Telegram 中查看原消息"
-                                >
-                                  <ExternalLink size={12} />
-                                </a>
-                              )}
+                    <div className="resource-raw-messages-list">
+                      {item.original_messages?.length ? (
+                        item.original_messages.map((m) => (
+                          <article className="resource-raw-card" key={m.id}>
+                            <div className="resource-raw-card-head">
+                              <div className="resource-raw-channel">
+                                <strong>{m.channel_name || "未知频道"}</strong>
+                                {m.message_url && (
+                                  <a
+                                    href={m.message_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="resource-raw-link"
+                                    title="在 Telegram 中查看原消息"
+                                  >
+                                    <ExternalLink size={12} />
+                                  </a>
+                                )}
+                              </div>
+                              <small className="resource-raw-time">
+                                {m.received_at ? formatDateTime(m.received_at) : ""}
+                              </small>
                             </div>
+                            <div className="resource-raw-content">
+                              <pre>{m.raw_text || "无正文内容"}</pre>
+                            </div>
+                          </article>
+                        ))
+                      ) : (
+                        <article className="resource-raw-card">
+                          <div className="resource-raw-card-head">
+                            <strong>{item.channel || "入库消息"}</strong>
                             <small className="resource-raw-time">
-                              {m.received_at ? formatDateTime(m.received_at) : ""}
+                              {formatDateTime(item.created_at || item.updated_at)}
                             </small>
                           </div>
                           <div className="resource-raw-content">
-                            <pre>{m.raw_text || "无正文内容"}</pre>
+                            <pre>{item.raw_text || "没有保存原始消息。"}</pre>
                           </div>
                         </article>
-                      ))
-                    ) : (
-                      <article className="resource-raw-card">
-                        <div className="resource-raw-card-head">
-                          <strong>{item.channel || "入库消息"}</strong>
-                          <small className="resource-raw-time">
-                            {formatDateTime(item.created_at || item.updated_at)}
-                          </small>
-                        </div>
-                        <div className="resource-raw-content">
-                          <pre>{item.raw_text || "没有保存原始消息。"}</pre>
-                        </div>
-                      </article>
-                    )}
-                  </div>
-                </section>
-              </div>
+                      )}
+                    </div>
+                  </section>
+                </div>
+              )}
             </div>
           </>
         )}
