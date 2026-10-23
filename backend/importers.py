@@ -10,6 +10,7 @@ from urllib.parse import quote, unquote, urlsplit
 import wordninja
 
 from .recognition import parse as parse_recognition
+from .resource_metadata import clean_person_name
 
 
 # Share URLs are parsed together so the rest of the ingestion pipeline can
@@ -59,8 +60,9 @@ SHARE_SEASON_TOTAL_RE = re.compile(r"全\s*(\d{1,2})\s*季|共\s*(\d{1,2})\s*季
 SHARE_SEASON_SPAN_RE = re.compile(r"第?\s*(\d{1,2})\s*[-~至到]\s*(\d{1,2})\s*季")
 # 「第1季」这类阿拉伯数字单季写法（中文数字见 CHINESE_SEASON_RE）。
 SHARE_SEASON_SINGLE_RE = re.compile(r"第\s*(\d{1,2})\s*季")
-# 「更新至第17集」表示该季目前收录 E01-E17。
-SHARE_EPISODE_PROGRESS_RE = re.compile(r"更新\s*[至到]?\s*第?\s*(\d{1,4})\s*集")
+# 「更新至第17集」表示该季目前收录 E01-E17；频道也常省略「集」字（「更新至26」），
+# 或用「更至10」，所以集数单位可选、动词也允许只写「更」。
+SHARE_EPISODE_PROGRESS_RE = re.compile(r"(?:更新|更)\s*[至到]?\s*第?\s*(\d{1,4})\s*(?:集|话|期)?")
 # 「第4季更新至第21集」里的第 4 季是该区间的归属季。
 SHARE_PROGRESS_OWNER_RE = re.compile(r"第\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*季\s*更新")
 # 单独的「第19集」是单集。
@@ -76,6 +78,19 @@ SHARE_TECHNICAL_RE = re.compile(
     r"ddp?|aac|dts|truehd|flac|h[._-]?26[45]|x26[45]|hevc|av1|avc|hdr|dv)(?!\w)"
 )
 SHARE_METADATA_PREFIXES = ("🌟", "📽", "🌍", "🗣", "👥", "📖", "💾", "🙋")
+# 字段式消息把标签写进正文首行（「名称：飞驰人生2（2024）」）。标签名不是片名，
+# 片名是冒号后面的值，年份通常就在值的括号里。
+SHARE_LABEL_PREFIX_RE = re.compile(r"^\s*(?:资源)?(?:名称|片名|剧名|标题|资源名)\s*[：:]\s*")
+# 画质/压制噪声词：只用于截断标题，不参与 quality 字段取值（后者仍由 QUALITY_RE 决定）。
+SHARE_NOISE_RE = re.compile(
+    r"(?i)(高码率|臻彩|杜比视界|杜比|蓝光原盘|蓝光|原盘|hdr10\+?|hdr|dovi|60帧|高帧率|1080|2160|720)"
+)
+# 「📺 007(系列)」「📺 黑夜传说 (系列)」「📺 速度与激情（系列）国英双语」：频道用同一个
+# 系列名给每一部单独发消息，所以这条标记既不是片名，也不表示这条消息是合集，
+# 而是「这部片属于哪个系列」。括号可能被导出截断，右括号因此可选。
+SHARE_COLLECTION_RE = re.compile(
+    r"[（(【\[]\s*(?:系列|合集)\s*[）)】\]]?|\b(?:collection|box[ .-]?set)\b", re.IGNORECASE
+)
 TECHNICAL_STOP_RE = re.compile(
     r"(?i)(?:^|[._\-\s])(2160p|1080p|1080i|720p|576p|480p|4K|WEB[._-]?DL|WEBRip|BluRay|BDRip|HDTV|REMUX|DVDRip|NF|AMZN|DSNP|HMAX|VIU|AI修复(?:版)?|修复版)(?=$|[._\-\s])"
 )
@@ -217,9 +232,51 @@ def split_joined_title(value: str) -> str | None:
     return None
 
 
+# 频道把集数/画质直接拼在片名后面（「凡人修仙传172」「破碎的愤怒 HDR10」），
+# 这种串拿去搜 TMDB 必然 0 结果。下面几个正则只用于「精确检索已落空」时的兜底查询词。
+SEARCH_NOISE_TAIL_RE = re.compile(
+    r"(?i)(?:\s*(?:4k|8k|2160p|1080p|720p|2160|1080|720|高码率|臻彩|杜比视界|杜比|hdr10\+?|hdr|dovi|60帧|高帧率|蓝光原盘|蓝光|原盘))+$"
+)
+SEARCH_PROGRESS_TAIL_RE = re.compile(r"(?:更新|更)\s*[至到]?\s*第?\s*\d{1,4}\s*(?:集|话|期)?\s*$")
+SEARCH_EPISODE_TAIL_RE = re.compile(r"(?i)\s*(?:ep|e)\s*\d{1,4}\s*$")
+SEARCH_CN_EPISODE_TAIL_RE = re.compile(r"\s*第\s*\d{1,4}\s*[集话期]\s*$")
+SEARCH_BARE_NUMBER_TAIL_RE = re.compile(r"\s*(\d{1,4})\s*$")
+
+
+def strip_search_noise(value: str, *, episodic: bool = False) -> str | None:
+    """Return the base title with trailing episode/quality noise removed.
+
+    Only used as an *additional* fallback query after an exact search returned
+    nothing. A bare trailing number is stripped only for episodic resources or
+    when it is too large to be a sequel number (``凡人修仙传172`` vs ``疾速追杀2``),
+    so genuine sequels keep their exact-title search.
+    """
+    text = (value or "").strip()
+    original = text
+    changed = True
+    while changed:
+        changed = False
+        for pattern in (SEARCH_PROGRESS_TAIL_RE, SEARCH_EPISODE_TAIL_RE, SEARCH_CN_EPISODE_TAIL_RE, SEARCH_NOISE_TAIL_RE):
+            stripped = pattern.sub("", text).strip(" \t-–—|·（）()[]【】")
+            if stripped and stripped != text:
+                text, changed = stripped, True
+    bare = SEARCH_BARE_NUMBER_TAIL_RE.search(text)
+    if bare:
+        head = text[: bare.start()].strip(" \t-–—|·（）()[]【】")
+        if len(head) >= 2 and (episodic or int(bare.group(1)) >= 10):
+            text = head
+    if text == original or len(text) < 2 or not is_search_title(text):
+        return None
+    return text
+
+
 def parse_title_year(value: str) -> tuple[str, Optional[int]]:
-    text = value.lstrip("\ufeff").strip(" \t-–—|·")
+    # 先去掉频道前缀 Emoji（如 🎬），否则括号年份不在字符串末尾时无法识别。
+    text = re.sub(r"^\s*[📺🎥🎬👤🗂🍿🎞️]+\s*", "", value.lstrip("\ufeff")).strip(" \t-–—|·")
     match = BRACKETED_YEAR_RE.search(text)
+    if not match:
+        # 年份后可能还有"全集"等后缀，退而匹配任意位置的括号年份。
+        match = SHARE_HEADER_YEAR_RE.search(text)
     year = int(match.group(1)) if match else None
     if match:
         text = text[: match.start()].rstrip(" \t-–—|·")
@@ -244,7 +301,7 @@ def infer_share_media_type(title: str, extra: str) -> str:
     if re.search(r"(?i)S\d{1,2}(?:E\d{1,3})?", haystack) or re.search(r"(?i)\bE\d{1,3}\s*[-~]\s*E\d{1,3}\b", haystack):
         return "tv"
     if re.search(
-        r"全\s*\d+\s*集|全\s*\d+\s*季|共\s*\d+\s*季|第\s*\d+\s*季|第\s*[一二三四五六七八九十]+\s*季|"
+        r"全\s*\d+\s*集|全集|全\s*\d+\s*季|共\s*\d+\s*季|第\s*\d+\s*季|第\s*[一二三四五六七八九十]+\s*季|"
         r"\d{1,3}\s*[-~至到]\s*\d{1,3}\s*集|剧集|电视剧|综艺|连续剧",
         haystack,
     ):
@@ -298,12 +355,32 @@ def _extract_channel_fields(value: str) -> dict[str, object]:
     return fields
 
 
+def _cut_unclosed_bracket(value: str) -> str:
+    """Drop an opening bracket that never closes; exports truncate such titles."""
+    pairs = (("（", "）"), ("(", ")"), ("【", "】"), ("[", "]"), ("《", "》"))
+    for opening, closing in pairs:
+        start = value.find(opening)
+        if start != -1 and closing not in value[start:]:
+            return value[:start].rstrip(" \t-–—|·")
+    return value
+
+
+def parse_share_heading(value: str) -> dict[str, object]:
+    """Public entry point: channel heading → title/year/season metadata."""
+    return _share_heading_details(value)
+
+
 def _share_heading_details(value: str) -> dict[str, object]:
     """Parse a channel-style heading such as ``📺 Title (2026) S01E02 ✨4K``."""
     heading = value.lstrip("\ufeff \t")
     marker = re.match(r"^\s*([📺🎥🎬👤🗂])", heading)
     resource_kind = "person" if marker and marker.group(1) == "👤" else "series" if marker and marker.group(1) == "🗂" else "media"
     heading = re.sub(r"^\s*[📺🎥🎬👤🗂🍿🎞️]+\s*", "", heading)
+    labelled = SHARE_LABEL_PREFIX_RE.match(heading)
+    if labelled:
+        # 「名称：飞驰人生2（2024）」这类字段式消息：片名是冒号后的值，
+        # 标签名本身不是标题，后面还有剧情简介等行，取到首行结束即可。
+        heading = heading[labelled.end():].strip() or heading
     year_match = SHARE_HEADER_YEAR_RE.search(heading) or YEAR_RE.search(heading)
     episode_match = SHARE_EPISODE_RE.search(heading)
     episode_range_match = SHARE_EPISODE_RANGE_RE.search(heading)
@@ -319,14 +396,21 @@ def _share_heading_details(value: str) -> dict[str, object]:
     season_match = episode_match or season_range_match or SHARE_SEASON_RE.search(heading)
     quality_match = QUALITY_RE.search(heading)
     technical_match = SHARE_TECHNICAL_RE.search(heading)
+    noise_match = SHARE_NOISE_RE.search(heading)
+    # 系列标记要在剥掉之前记下来：剥掉之后它既搜不到、也认不出归属。
+    collection_match = SHARE_COLLECTION_RE.search(heading)
+    is_collection = collection_match is not None
 
     cut_points = [
         match.start() for match in
-        (year_match, episode_match, quality_match, technical_match, season_total_match, season_span_match,
+        (year_match, episode_match, quality_match, technical_match, noise_match, season_total_match, season_span_match,
          season_single_match, chinese_season_match, episode_span_match, episode_total_match,
          episode_progress_match, episode_single_match)
         if match
     ]
+    if collection_match:
+        # 「速度与激情（系列）国英双语」：系列标记之后的都是版本备注，不是片名。
+        cut_points.append(collection_match.start())
     title = heading[: min(cut_points)] if cut_points else heading
     title = title.strip(" \t-–—|·()（）[]【】✨") or "未命名"
     title = title.splitlines()[0].strip(" \t-–—|·()（）[]【】✨") or "未命名"
@@ -334,9 +418,20 @@ def _share_heading_details(value: str) -> dict[str, object]:
     # example ``📺 剧集：兰香如故 (2026)``. Keep the category as metadata but
     # use the actual title for media grouping and TMDB matching.
     title = re.sub(r"^(?:剧集|电影|动漫|综艺)\s*[：:]\s*", "", title).strip() or "未命名"
-    if resource_kind == "series":
-        title = re.sub(r"\s*[（(]系列[）)]?\s*$", "", title).strip() or title
+    # 「（系列）」「（合集）」是资源集合标注，不是片名：任何类型都要剥掉，
+    # 否则 TMDB 永远搜不到「生化危机（系列）」这种标题。
+    title = re.sub(r"\s*[（(【\[]\s*(?:系列|合集|全集)\s*[）)】\]]?\s*$", "", title).strip() or title
+    # 只有整个标题都被书名号包住时（「《白日提灯》」）才去掉书名号；
+    # 「《原神》音乐会」这类书名号属于片名本身，必须保留。
+    title = re.sub(r"^《(.+)》$", r"\1", title).strip() or title
+    # 导出/转发可能把括号截断（「星球大战（系列」「逐玉（1-15」）：只保留括号前的片名。
+    title = _cut_unclosed_bracket(title).strip() or title
     year = int(year_match.group(1)) if year_match else None
+    if resource_kind == "person":
+        # 人物条目按名字聚合：清洗姓名尾部标点（如「浅野心，」）；
+        # 「生日：1994-…」里的年份不是作品年份，不能入库。
+        title = clean_person_name(title) or title
+        year = None
     season = int(season_match.group(1)) if season_match else None
     episode = int(episode_match.group(2)) if episode_match else (int(episode_range_match.group(1)) if episode_range_match else None)
     if episode_range_match and not season_match:
@@ -427,13 +522,24 @@ def _share_heading_details(value: str) -> dict[str, object]:
         if re.search(pattern, heading) and label not in hdr_tags:
             hdr_tags.append(label)
 
-    media_type = "tv" if season is not None or episode is not None else infer_share_media_type(title, heading)
-    if marker and marker.group(1) == "📺":
+    # 季集标记与剧集关键词（如"全集"）是内容事实，优先于频道 Emoji 标记——
+    # 部分频道给所有投稿（包括剧集全集）统一加 🎬，不能让 Emoji 压过结构证据。
+    inferred_type = "tv" if season is not None or episode is not None else infer_share_media_type(title, heading)
+    if inferred_type == "tv":
+        media_type = "tv"
+    elif marker and marker.group(1) == "📺":
         media_type = "tv"
     elif marker and marker.group(1) in {"🎥", "🎬"}:
         media_type = "movie"
+    elif inferred_type == "movie":
+        media_type = "movie"
+    else:
+        media_type = "unknown"
     if resource_kind != "media":
         media_type = "unknown"
+    if media_type == "tv" and season is None:
+        # 没有季集线索的剧集资源默认视为整季：记为 S01（episode 为空即整季）。
+        season = 1
     media_info = heading[technical_match.start() :].splitlines()[0].strip(" \t✨") if technical_match else None
     quality_tags = extract_quality_tags(heading, media_info)
     quality = quality_match.group(1).upper() if quality_match else None
@@ -451,6 +557,7 @@ def _share_heading_details(value: str) -> dict[str, object]:
         "episode": episode,
         "media_type": media_type,
         "resource_kind": resource_kind,
+        "collection": is_collection,
         "resource_metadata": {
             key: match.group(1).strip()
             for key, pattern in {
@@ -498,6 +605,7 @@ def parse_share_line(
     *,
     context: str | None = None,
     access_context: str | None = None,
+    person_context: str | None = None,
 ) -> Optional[ParsedSource]:
     raw = line.rstrip("\r\n")
     match = SHARE_URL_RE.search(raw)
@@ -521,7 +629,9 @@ def parse_share_line(
     prefix = raw[: match.start()].strip("\ufeff \t")
     suffix = raw[match.end() :].strip(" \t")
     label = prefix.split("\t", 1)[0].strip() if prefix else suffix
-    heading = context if context and _is_generic_share_label(label) else None
+    # 人物消息（如 lsp115）解析出的资源都归属该人物：person_context 存在时
+    # 标题一律取人物标题块，不看链接行自身的标签。
+    heading = context if context and (person_context or _is_generic_share_label(label)) else None
     details = _share_heading_details(heading or label)
     if heading is None:
         # Preserve the established one-line format while extracting episode and
@@ -573,6 +683,7 @@ def parse_share_line(
                 "quality_tags": details.get("quality_tags"),
                 "media_info": details.get("media_info"),
                 "resource_kind": details.get("resource_kind"),
+                "collection": details.get("collection"),
                 "resource_metadata": details.get("resource_metadata"),
                 "channel_fields": details.get("channel_fields"),
                 "extra": suffix,
@@ -595,7 +706,7 @@ def iter_share_sources(content: str, *, person_context: str | None = None) -> It
         label = prefix.split("\t", 1)[0].strip() if prefix else ""
         context = person_context or (_find_share_heading(lines, index) if _is_generic_share_label(label) else None)
         access_context = lines[index + 1] if index + 1 < len(lines) and ACCESS_CODE_RE.search(lines[index + 1]) else None
-        parsed = parse_share_line(line, context=context, access_context=access_context)
+        parsed = parse_share_line(line, context=context, access_context=access_context, person_context=person_context)
         if parsed:
             if content_targets:
                 parsed.metadata["explicit_tmdb_ids"] = list(dict.fromkeys(tmdb_id for tmdb_id, _ in content_targets))
@@ -803,6 +914,11 @@ def parse_ed2k_link(
     if context_title and context_title != "未命名" and not context_title.lower().startswith("链接"):
         title = context_title
         year = year or context_year
+    if resource_kind == "person":
+        # 人物资源归属人物本身：标题取清洗后的人物名，
+        # 文件名/生日里的年份不是人物年份，一律留空。
+        title = clean_person_name(title) or title
+        year = None
 
     return ParsedSource(
         source_type="ed2k",

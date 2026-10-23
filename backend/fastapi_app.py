@@ -13,15 +13,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from . import ingestion
 from .ingestion_config import INGESTION_CONFIG_PATH, read_ingestion_key, save_ingestion_key
 from .repository import (
-    delete_candidate, get_media, get_media_by_tmdb_id, get_media_filters, get_stats,
-    import_content, link_tmdb, list_imports, list_ingestion_records, list_media, unlink_tmdb,
+    delete_candidate, get_media, get_media_by_tmdb_id, get_media_filters, get_series, get_stats,
+    import_content, link_tmdb, list_imports, list_ingestion_records, list_media, list_series, unlink_tmdb,
     update_media_fields,
 )
 from .resources import check_resource, get_resource, get_resource_filters, list_resources, update_resource
 from .schema import ROOT_DIR, init_db, resolve_db_path
 from .share115 import Share115Error
 from .share_audit import audit_status, pause_audit
-from .tmdb import TmdbClient, TmdbError, bulk_match, search_media
+from .tmdb import TmdbClient, TmdbError, bulk_match, ensure_tmdb_seasons, search_media
 from .telegram_avatar import AVATAR_CACHE_DIR, cache_channel_avatar, normalize_channel_username
 
 DIST_DIR = ROOT_DIR / "frontend" / "dist"
@@ -144,8 +144,8 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
     async def media_filters(): return get_media_filters(db())
 
     @app.get("/api/media")
-    async def media(q: str = "", status: str = "all", type: str = "all", resource_kind: str = "all", source: str = "all", availability: str = "all", year: str = "all", genre: str = "all", country: str = "all", quality: str = "all", codec: str = "all", hdr: str = "all", multi_source: bool = False, sort: str = "updated_desc", page: int = 1, page_size: int = 30):
-        return list_media(query=q, status=status, media_type=type, resource_kind=resource_kind, source_type=source, availability=availability, year=year, genre=genre, country=country, quality=quality, codec=codec, hdr=hdr, multi_source_only=multi_source, sort=sort, page=page, page_size=page_size, db_path=db())
+    async def media(q: str = "", status: str = "all", type: str = "all", category: str = "all", resource_kind: str = "all", source: str = "all", availability: str = "all", year: str = "all", genre: str = "all", country: str = "all", quality: str = "all", codec: str = "all", hdr: str = "all", multi_source: bool = False, sort: str = "updated_desc", page: int = 1, page_size: int = 30):
+        return list_media(query=q, status=status, media_type=type, category=category, resource_kind=resource_kind, source_type=source, availability=availability, year=year, genre=genre, country=country, quality=quality, codec=codec, hdr=hdr, multi_source_only=multi_source, sort=sort, page=page, page_size=page_size, db_path=db())
 
     @app.get("/api/resources/filters")
     async def resource_filters():
@@ -183,10 +183,24 @@ def create_app(db_path=None, static_dir=None) -> FastAPI:
             raise HTTPException(404, "资源来源不存在。")
         return item
 
+    @app.get("/api/series")
+    async def series(q: str = ""):
+        return {"items": list_series(q, db())}
+
+    @app.get("/api/series/{series_id}")
+    async def series_detail(series_id: int):
+        item = get_series(series_id, db())
+        if not item: raise HTTPException(404, "系列不存在。")
+        return item
+
     @app.get("/api/media/{media_id}")
     async def media_detail(media_id: int):
         item = get_media(media_id, db())
         if not item: raise HTTPException(404, "媒体记录不存在。")
+        # 已匹配剧集缺季集基准时懒回填一次，供覆盖格子图使用；失败不影响详情展示。
+        if item.get("media_type") == "tv" and not item.get("seasons_json"):
+            if ensure_tmdb_seasons(item, db()):
+                item = get_media(media_id, db())
         return item
 
     @app.get("/api/media/tmdb/{tmdb_id}/resources")

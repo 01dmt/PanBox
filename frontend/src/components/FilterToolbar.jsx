@@ -30,7 +30,13 @@ export default function FilterToolbar({ view, filters, options, search, total, l
   const decades = [...new Set((options?.years || []).map((year) => Math.floor(year / 10) * 10))].map((year) => [`${year}s`, `${year} - ${year + 9}`]);
   const genreOptions = [["all", "全部题材"], ...(options?.genres || []).map(({ id, name }) => [String(id), ({ 10765: "科幻与奇幻", 10768: "战争与政治" })[id] || name])];
   const countryOptions = [["all", "全部国家 / 地区"], ...(options?.countries || []).map((code) => [code, regionNames.of(code)])];
-  const statusOptions = view === "pending" ? [["all", "全部待处理"], ...STATUSES.filter(([id]) => !["all", "matched", "pending"].includes(id))] : STATUSES;
+  const statusOptions = view === "pending"
+    ? [["all", "全部待处理"], ...STATUSES.filter(([id]) => !["all", "matched", "pending"].includes(id))]
+    : view === "library"
+      // 影视库默认只展示已匹配 TMDB 的作品（App.jsx 将 all 映射为 matched）；
+      // 其余状态仍可手动选择查看。
+      ? [["all", "已匹配"], ...STATUSES.filter(([id]) => !["all", "matched"].includes(id))]
+      : STATUSES;
   const choices = { availability: AVAILABILITY, type: TYPES, resource_kind: RESOURCE_KINDS, source: SOURCES, status: statusOptions,
     year: [["all", "全部年份"], ["unknown", "年份未知"], ...years, ...decades], genre: genreOptions,
     country: countryOptions, quality: QUALITIES, codec: CODECS, hdr: HDR };

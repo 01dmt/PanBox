@@ -83,18 +83,24 @@ class ShareRequestGate:
             delay = next_at - time.time()
             if delay > 0:
                 time.sleep(delay)
+            # 5 秒间隔从「本次请求发起」开始算，而不是等请求返回再算：请求返回耗时
+            # （115 接口约需数秒）不再被额外串进间隔里，节奏才是真正的每 5 秒一次。
+            # 抢占动作在锁内完成，并发线程只有一条能拿到本档，请求仍然严格串行。
+            state.update(next_at=time.time() + self.interval, updated_at=utc_now())
+            file.seek(0)
+            file.truncate()
+            json.dump(state, file)
+            file.flush()
             try:
                 yield
             except Share115Error as exc:
                 if exc.risk_control:
                     state.update(paused=True, reason="access_restriction", paused_at=utc_now(), last_error_errno=exc.errno)
+                    file.seek(0)
+                    file.truncate()
+                    json.dump(state, file)
+                    file.flush()
                 raise
-            finally:
-                state.update(next_at=time.time() + self.interval, updated_at=utc_now())
-                file.seek(0)
-                file.truncate()
-                json.dump(state, file)
-                file.flush()
 
 
 def utc_now() -> str:

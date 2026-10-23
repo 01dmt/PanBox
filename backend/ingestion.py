@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -10,18 +11,22 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .importers import detect_source_kind, iter_sources
-from .repository import import_content
+from .repository import import_content, save_candidates
+from .resource_metadata import clean_person_name
 from .resource_pages import expand_resource_pages
 from .schema import connect, init_db
 from .share115 import Share115Client, Share115Error
 from .share123 import Share123Client, Share123Error
 from .share_guangya import ShareGuangyaClient, ShareGuangyaError
-from .tmdb import TmdbClient, TmdbError, search_media
+from .tmdb import TmdbClient, search_media
 from .telegram_avatar import cache_channel_avatar, fetch_public_channel_avatar, normalize_channel_username
 
 
 class IngestionError(ValueError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 _INIT_LOCK = threading.Lock()
@@ -66,6 +71,8 @@ def _lsp115_person_context(text: str, source: dict[str, Any]) -> str | None:
 
     profile = match.group(1).strip()
     name = re.split(rf"\s*(?=[{_PERSON_LABEL_MARKERS}])", profile, maxsplit=1)[0].strip()
+    # 「👤 浅野心，🎂 生日：…」里姓名后的逗号要洗掉，否则同一个人会被拆成多个条目。
+    name = clean_person_name(name)
     if not name:
         return None
 
@@ -94,32 +101,54 @@ def _auto_match_media(media_ids: set[int], db_path=None) -> dict[int, str]:
     the source was stored, and a temporary TMDB/network error must not turn a
     valid webhook into a failed delivery. ``search_media`` still enforces the
     confidence and ambiguity rules, so only high-confidence candidates are
-    linked automatically; everything else remains in review/pending state.
+    linked automatically; everything else stays in review state, and matcher
+    failures are recorded as errors instead of silently remaining pending.
     """
     if not media_ids:
         return {}
     client = TmdbClient()
     if not client.configured:
+        logger.warning("TMDB 未配置，入库作品未自动匹配 media_ids=%s", sorted(media_ids))
         return {}
     results: dict[int, str] = {}
+    with connect(db_path) as db:
+        kinds = {
+            int(row["id"]): (str(row["resource_kind"]), int(row["is_bundle"] or 0))
+            for row in db.execute(
+                "SELECT id, resource_kind, is_bundle FROM media_items WHERE id IN (%s)" % ",".join("?" * len(media_ids)),
+                sorted(media_ids),
+            )
+        }
     for media_id in sorted(media_ids):
+        # 人物条目不是 TMDB 影视作品：不参与匹配，也不记录“匹配错误”。
+        if (kinds.get(media_id) or ("media", 0))[0] == "person":
+            results[media_id] = "skipped_person"
+            continue
+        # 整个系列打成一个分享时拆不出成员，按单片匹配只会错绑其中一部。
+        if (kinds.get(media_id) or ("media", 0))[1]:
+            results[media_id] = "skipped_bundle"
+            continue
         try:
             result = search_media(
                 media_id,
                 auto_link=True,
                 # Recognition must not probe or remove 115 sources. Link
                 # validity belongs to the separate low-frequency audit.
-                refresh_share=False,
                 check_share=False,
                 db_path=db_path,
                 client=client,
             )
             results[media_id] = str(result.get("status") or "unknown")
-        except TmdbError:
-            results[media_id] = "error"
-        except Exception:
-            # Keep delivery processing resilient to an unexpected matcher
-            # failure. The media item remains available for manual retry.
+        except Exception as exc:
+            # Keep delivery processing resilient to a matcher failure, but
+            # never fail silently: record and log the reason so the error is
+            # visible and the media can be retried instead of lingering as a
+            # pending item without a poster.
+            logger.exception("TMDB 自动匹配失败 media_id=%s", media_id)
+            try:
+                save_candidates(media_id, [], "error", str(exc), db_path)
+            except Exception:
+                logger.exception("记录匹配错误失败 media_id=%s", media_id)
             results[media_id] = "error"
     return results
 
@@ -171,7 +200,15 @@ def _refresh_channel_avatar(ingestion_id: str, source: dict[str, str | None], db
             db.execute("UPDATE ingestion_events SET channel_avatar_url = ? WHERE channel_username = ?", (avatar_url, username))
 
 
-def receive(body: dict[str, Any], db_path=None) -> dict[str, Any]:
+def receive(body: dict[str, Any], db_path=None, *, background: bool = True, auto_match: bool = True) -> dict[str, Any]:
+    """接收一条消息；``background=False`` 时在调用线程里同步处理完再返回。
+
+    Webhook 用默认的后台线程模式立刻返回 202；批量导入（`import-telegram`）用
+    同步模式，这样调用方能用自己的线程池限制并发，而不是每条消息开一个线程。
+
+    ``auto_match=False`` 跳过 TMDB 自动匹配，作品保持待匹配，导入结束后可以批量
+    跑 `app.py match`，避免大批量导入时每条消息都打一次 TMDB。
+    """
     if not isinstance(body, dict):
         raise IngestionError("请求必须是 JSON 对象。")
     event_id = str(body.get("event_id") or "").strip()
@@ -201,9 +238,20 @@ def receive(body: dict[str, Any], db_path=None) -> dict[str, Any]:
             if existing:
                 return {"accepted": True, "id": existing["id"], "event_id": event_id, "status": existing["status"], "duplicate": True}
             raise sqlite3.IntegrityError("ingestion event was ignored but could not be read")
-    thread = threading.Thread(target=process, args=(ingestion_id, text, db_path), daemon=True)
-    thread.start()
-    return {"accepted": True, "id": ingestion_id, "event_id": event_id, "status": "queued", "duplicate": False}
+    if background:
+        thread = threading.Thread(target=process, args=(ingestion_id, text, db_path), kwargs={"auto_match": auto_match}, daemon=True)
+        thread.start()
+        return {"accepted": True, "id": ingestion_id, "event_id": event_id, "status": "queued", "duplicate": False}
+    process(ingestion_id, text, db_path, auto_match=auto_match)
+    with connect(db_path) as db:
+        row = db.execute("SELECT status FROM ingestion_events WHERE id=?", (ingestion_id,)).fetchone()
+    return {
+        "accepted": True,
+        "id": ingestion_id,
+        "event_id": event_id,
+        "status": str(row["status"]) if row else "queued",
+        "duplicate": False,
+    }
 
 
 def _validation_error(exc: Exception) -> tuple[str, bool]:
@@ -247,7 +295,7 @@ def _set_event_status(ingestion_id: str, status: str, media_ids: set[int], error
         )
 
 
-def _validate_and_import(ingestion_id: str, text: str, sources, db_path=None) -> None:
+def _validate_and_import(ingestion_id: str, text: str, sources, db_path=None, *, auto_match: bool = True) -> None:
     """Run one event's validation unless another thread already owns it.
 
     The retry worker can see an event's freshly created ``pending_validation``
@@ -261,13 +309,13 @@ def _validate_and_import(ingestion_id: str, text: str, sources, db_path=None) ->
     if busy:
         return
     try:
-        _run_validation_and_import(ingestion_id, text, sources, db_path)
+        _run_validation_and_import(ingestion_id, text, sources, db_path, auto_match=auto_match)
     finally:
         with _PROCESSING_LOCK:
             _PROCESSING_EVENTS.discard(ingestion_id)
 
 
-def _run_validation_and_import(ingestion_id: str, text: str, sources, db_path=None) -> None:
+def _run_validation_and_import(ingestion_id: str, text: str, sources, db_path=None, *, auto_match: bool = True) -> None:
     """Validate extracted cloud shares, then import only the confirmed ones."""
     with connect(db_path) as db:
         for source in sources:
@@ -382,11 +430,11 @@ def _run_validation_and_import(ingestion_id: str, text: str, sources, db_path=No
     else:
         _set_event_status(ingestion_id, "failed", media_ids, invalid[0][1] if invalid else "链接暂未通过校验。", db_path)
 
-    if media_ids:
+    if media_ids and auto_match:
         _auto_match_media(media_ids, db_path)
 
 
-def process(ingestion_id: str, text: str, db_path=None) -> None:
+def process(ingestion_id: str, text: str, db_path=None, *, auto_match: bool = True) -> None:
     try:
         with connect(db_path) as db:
             event_source_row = db.execute(
@@ -402,7 +450,7 @@ def process(ingestion_id: str, text: str, db_path=None) -> None:
             with connect(db_path) as db:
                 db.execute("UPDATE ingestion_events SET status='ignored', error=?, processed_at=? WHERE id=?", ("未提取到支持的 115、123、光鸭或 ED2K 资源。", _now(), ingestion_id))
             return
-        _validate_and_import(ingestion_id, expanded_text, sources, db_path)
+        _validate_and_import(ingestion_id, expanded_text, sources, db_path, auto_match=auto_match)
         # Do this after the import transaction is committed. A webhook should
         # acknowledge and retain its resources even if TMDB is unavailable;
         # successful matches are linked automatically by search_media.

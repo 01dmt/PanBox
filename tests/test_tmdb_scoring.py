@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 import unittest
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.repository import import_content, list_media, get_media
+from backend.repository import import_content, link_tmdb, list_media, get_media
 from backend.tmdb import (
-    TmdbClient, TmdbError, collect_search_context, dated_candidates, search_media,
+    TmdbClient, TmdbError, bulk_match, collect_search_context, dated_candidates, ensure_tmdb_seasons, search_media,
     score_candidate, should_auto_link, tmdb_year,
     matching_candidates,
 )
@@ -724,7 +725,7 @@ class TmdbScoringTests(unittest.TestCase):
             self.assertEqual(client.calls[0][0], "/tv/282326")
             self.assertEqual(result["status"], "matched")
 
-    def test_tv_match_without_season_episode_stays_for_review(self) -> None:
+    def test_tv_match_without_season_episode_defaults_to_whole_season(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "media.db"
             import_content(
@@ -738,16 +739,54 @@ class TmdbScoringTests(unittest.TestCase):
             def respond(path, params):
                 if path == "/tv/235643":
                     return {"id": 235643, "name": "逆天邪神", "media_type": "tv", "first_air_date": "2023-12-01",
+                            "poster_path": "/nx.jpg",
                             "number_of_seasons": 1, "seasons": [{"season_number": 1, "episode_count": 12}]}
                 return {"results": []}
 
             result = search_media(mid, auto_link=True, db_path=db, client=FakeTmdbClient(respond))
             item = get_media(mid, db)
-            # 资源已经入库，但没有季集线索：停在待确认并保留候选，方便人工核对覆盖范围。
-            self.assertEqual(result["status"], "review")
-            self.assertEqual(item["tmdb_status"], "review")
-            self.assertEqual([candidate["tmdb_id"] for candidate in item["candidates"]], [235643])
-            self.assertEqual(len(item["sources"]), 1)
+            # 没有季集线索的剧集资源默认视为整季：正常自动关联，来源补记 S01。
+            self.assertEqual(result["status"], "matched")
+            self.assertEqual(item["tmdb_status"], "matched")
+            self.assertEqual(item["tmdb_id"], 235643)
+            self.assertEqual(item["poster_path"], "/nx.jpg")
+            source = item["sources"][0]
+            self.assertEqual((source["season"], source["episode"]), (1, None))
+            # 关联时顺手缓存 TMDB 季集基准，供详情页覆盖格子图使用。
+            self.assertEqual(json.loads(item["seasons_json"]), [{"season": 1, "episode_count": 12}])
+
+    def test_ensure_tmdb_seasons_fills_cache_lazily(self) -> None:
+        # 历史数据没有季集基准：查看详情时抓取一次并存库，之后直接读缓存。
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "media.db"
+            import_content("📺 老剧 (2020)\n🔗 https://115cdn.com/s/older?pwd=x", "old.txt", db_path=db)
+            mid = list_media(db_path=db)["items"][0]["id"]
+            link_tmdb(
+                mid,
+                {"tmdb_id": 9001, "media_type": "tv", "title": "老剧", "first_air_date": "2020-01-01"},
+                1.0,
+                "test",
+                db,
+            )
+            item = get_media(mid, db)
+            self.assertIsNone(item["seasons_json"])
+
+            def respond(path, params):
+                self.assertEqual(path, "/tv/9001")
+                return {"id": 9001, "name": "老剧", "first_air_date": "2020-01-01",
+                        "seasons": [{"season_number": 0, "episode_count": 3},
+                                    {"season_number": 1, "episode_count": 10},
+                                    {"season_number": 2, "episode_count": 8}]}
+
+            client = FakeTmdbClient(respond)
+            seasons = ensure_tmdb_seasons(item, db, client)
+            # 特别篇（S00）不计入基准。
+            self.assertEqual(seasons, [{"season": 1, "episode_count": 10}, {"season": 2, "episode_count": 8}])
+            item = get_media(mid, db)
+            self.assertEqual(json.loads(item["seasons_json"]), seasons)
+            # 第二次调用直接读缓存，不再请求 TMDB。
+            self.assertEqual(ensure_tmdb_seasons(item, db, client), seasons)
+            self.assertEqual(len(client.calls), 1)
 
     def test_movie_match_without_season_episode_still_links(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -768,6 +807,75 @@ class TmdbScoringTests(unittest.TestCase):
             result = search_media(mid, auto_link=True, db_path=db, client=FakeTmdbClient(respond))
             self.assertEqual(result["status"], "matched")
             self.assertEqual(get_media(mid, db)["tmdb_id"], 1381078)
+
+
+class SearchNoiseFallbackTests(unittest.TestCase):
+    """精确检索落空后，用去掉集数尾巴的基础片名再搜一次。"""
+
+    class StubImdb:
+        def exact_matches(self, queries, year, episodic=False):
+            return []
+
+    def search(self, heading, responder):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "media.db"
+            import_content(f"{heading}\nhttps://115.com/s/example", "test.txt", db_path=db)
+            media_id = list_media(db_path=db)["items"][0]["id"]
+            client = FakeTmdbClient(responder)
+            outcome = search_media(
+                media_id, auto_link=True, db_path=db, client=client, imdb_client=self.StubImdb()
+            )
+            queries = [params["query"] for path, params in client.calls if "query" in params]
+            return outcome, queries
+
+    def test_episode_suffix_retries_with_the_base_title(self) -> None:
+        show = [{"id": 999, "name": "凡人修仙传", "media_type": "tv", "first_air_date": "2020-07-25"}]
+
+        def responder(path, params):
+            if "query" in params:
+                return {"results": []} if "172" in params["query"] else {"results": show}
+            return {"id": 999, "name": "凡人修仙传", "media_type": "tv", "first_air_date": "2020-07-25"}
+
+        outcome, queries = self.search("📺 凡人修仙传172", responder)
+        self.assertIn("凡人修仙传", queries)
+        # 尾巴被去掉后能搜到候选，交给人工确认（标题不含集数，自动关联会误伤续集）。
+        self.assertEqual(outcome["status"], "review")
+        self.assertTrue(outcome["candidates"])
+
+    def test_real_sequel_never_falls_back_to_the_first_film(self) -> None:
+        def responder(path, params):
+            return {"results": []}
+
+        outcome, queries = self.search("🎥 疾速追杀2", responder)
+        self.assertNotIn("疾速追杀", queries)
+        self.assertEqual(outcome["status"], "not_found")
+
+
+class BulkMatchWorkersTests(unittest.TestCase):
+    """并发检索只改墙钟时间，结果的计数必须和串行一致。"""
+
+    def test_parallel_pass_counts_every_media_once(self) -> None:
+        def fake_search(media_id, **kwargs):
+            return {"status": "matched" if media_id % 2 else "review", "removed_sources": 0}
+
+        with patch("backend.tmdb.pending_media_ids", return_value=[1, 2, 3, 4, 5]), patch(
+            "backend.tmdb.search_media", side_effect=fake_search
+        ):
+            result = bulk_match(10, db_path=None, client=TmdbClient(api_key="test"), workers=4)
+
+        self.assertEqual(result["processed"], 5)
+        self.assertEqual(result["matched"], 3)
+        self.assertEqual(result["review"], 2)
+        self.assertEqual(result["errors"], 0)
+
+    def test_serial_pass_still_works(self) -> None:
+        with patch("backend.tmdb.pending_media_ids", return_value=[7]), patch(
+            "backend.tmdb.search_media", return_value={"status": "not_found", "removed_sources": 1}
+        ):
+            result = bulk_match(10, db_path=None, client=TmdbClient(api_key="test"), workers=1)
+
+        self.assertEqual(result["not_found"], 1)
+        self.assertEqual(result["removed_sources"], 1)
 
 
 if __name__ == "__main__":

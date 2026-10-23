@@ -3,6 +3,7 @@ import {
   Database,
   FileClock,
   Film,
+  FolderOpen,
   Layers3,
   Library,
   LayoutDashboard,
@@ -17,17 +18,13 @@ const NAV_ITEMS = [
   { id: "dashboard", label: "仪表盘", icon: LayoutDashboard },
   { id: "library", label: "影视库", icon: Library },
   { id: "resources", label: "资源库", icon: Layers3 },
-  { id: "duplicates", label: "多来源", icon: Layers3, countKey: "multi" },
+  { id: "series", label: "系列", icon: FolderOpen },
   { id: "imports", label: "入库记录", icon: FileClock },
   { id: "settings", label: "设置", icon: Settings },
 ];
 
 
 export default function Sidebar({ view, onChange, stats, config, providerOptions = [] }) {
-  const counts = {
-    pending: stats?.media?.pending ?? 0,
-    multi: stats?.multi_source ?? 0,
-  };
   const providerCounts = new Map((stats?.sources?.providers || []).map((provider) => [provider.id, provider.count]));
   const providers = providerOptions.length
     ? providerOptions.map((provider) => ({ ...provider, count: providerCounts.get(provider.id) || 0 }))
@@ -46,7 +43,6 @@ export default function Sidebar({ view, onChange, stats, config, providerOptions
       <nav className="sidebar-nav" aria-label="主导航">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
-          const count = item.countKey ? counts[item.countKey] : null;
           return (
             <button
               key={item.id}
@@ -56,7 +52,6 @@ export default function Sidebar({ view, onChange, stats, config, providerOptions
             >
               <Icon size={18} />
               <span>{item.label}</span>
-              {count ? <small>{formatNumber(count)}</small> : null}
             </button>
           );
         })}

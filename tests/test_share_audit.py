@@ -29,6 +29,36 @@ class ShareRequestGateTests(unittest.TestCase):
                 pass
             sleep.assert_called_once_with(5)
 
+    def test_interval_counts_from_request_start_not_completion(self):
+        # 5 秒从请求发起时开始算：请求本身耗时 10 秒，下一档仍按发起时刻 +5 秒。
+        clock = {"now": 100.0}
+
+        with patch("backend.share115.time.time", side_effect=lambda: clock["now"]):
+            with self.gate.request():
+                clock["now"] = 110.0  # 请求返回耗时 10 秒
+        state = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(state["next_at"], 105)
+
+    def test_slow_request_does_not_delay_the_next_slot(self):
+        # 上一次请求耗时 10 秒时，下一次调用不该再额外等 5 秒（旧实现会等）。
+        clock = {"now": 100.0}
+        sleeps: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        with patch("backend.share115.time.time", side_effect=lambda: clock["now"]), patch(
+            "backend.share115.time.sleep", side_effect=sleep
+        ):
+            with self.gate.request():
+                clock["now"] = 110.0
+            with ShareRequestGate(self.path).request():
+                pass
+        self.assertEqual(sleeps, [])
+        state = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(state["next_at"], 115)
+
     def test_risk_signal_latches_across_clients_without_sleep_or_retry(self):
         with self.assertRaises(Share115Error), self.gate.request():
             raise Share115Error("blocked", risk_control=True)

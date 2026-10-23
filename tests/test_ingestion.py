@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import concurrent.futures
+import inspect
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from backend.ingestion import _lsp115_person_context, get_event, receive, reprocess_ignored
-from backend.repository import _format_ingestion_episode_labels, list_ingestion_records
+from backend.importers import ParsedSource
+from backend.ingestion import _auto_match_media, _lsp115_person_context, get_event, receive, reprocess_ignored
+from backend.repository import _format_ingestion_episode_labels, get_media, import_content, list_ingestion_records, list_media, pending_media_ids
 from backend.schema import connect
 from backend.share115 import Share115Error
+from backend.tmdb import search_media
 
 
 class IngestionTests(unittest.TestCase):
@@ -85,8 +88,10 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(event["status"], "imported")
         search.assert_called_once()
         self.assertTrue(search.call_args.kwargs["auto_link"])
-        self.assertFalse(search.call_args.kwargs["refresh_share"])
         self.assertFalse(search.call_args.kwargs["check_share"])
+        # 调用参数必须与 search_media 签名兼容：参数漂移曾被 except 静默吞掉，
+        # 导致新入库作品永远停在 pending 且不显示海报。
+        inspect.signature(search_media).bind(0, **search.call_args.kwargs)
 
     def test_successful_retry_clears_stale_ingestion_error(self) -> None:
         with patch("backend.ingestion.expand_resource_pages", return_value="电影 (2024) https://115.com/s/retry"):
@@ -346,6 +351,122 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(source["resource_class"], "person")
         self.assertIn("代表作一 / 代表作二", source["metadata_json"])
         self.assertIsNone(_lsp115_person_context(message, {"channel_username": "other-channel"}))
+
+    def test_lsp115_person_messages_aggregate_under_clean_name(self) -> None:
+        source = {"service": "telegram", "channel_name": "115网盘资源分享频道", "channel_username": "Lsp115"}
+        messages = [
+            ("lsp115-person-a", "👤 浅野心，🎂 生日：1994-01-01 🏠 出生地：日本\n"
+                               "ed2k://|file|浅野心合集1.zip|40|" + "A" * 32 + "|/"),
+            ("lsp115-person-b", "👤 浅野心\n"
+                               "ed2k://|file|浅野心合集2.zip|40|" + "B" * 32 + "|/"),
+        ]
+        with patch("backend.ingestion.TmdbClient") as client_type:
+            client_type.return_value.configured = False
+            media_ids = []
+            for event_id, text in messages:
+                result = receive({"event_id": event_id, "source": source, "message": {"text": text}}, self.db_path)
+                event = self.wait_for_status(result["id"])
+                self.assertEqual(event["status"], "imported")
+                media_ids.append(event["media_ids"])
+        with connect(self.db_path) as db:
+            rows = db.execute("SELECT title, year, resource_kind FROM media_items").fetchall()
+            person_sources = db.execute("SELECT COUNT(*) FROM source_records WHERE resource_class='person'").fetchone()[0]
+        # 同一人物的两条消息聚合成一个条目：名字清洗尾随逗号、不取生日年份。
+        self.assertEqual([tuple(r) for r in rows], [("浅野心", None, "person")])
+        self.assertEqual(person_sources, 2)
+        self.assertEqual(media_ids[0], media_ids[1])
+
+
+class AutoMatchTests(unittest.TestCase):
+    """入库自动匹配必须真实调用 search_media；参数漂移曾被静默吞掉，作品永远停在 pending 且无海报。"""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.db_path = Path(self.temp_dir.name) / "media.db"
+        import_content("邪不压正 (2018) https://115.com/s/abc?password=abcd", "msg.txt", db_path=self.db_path)
+        self.media_id = list_media(db_path=self.db_path)["items"][0]["id"]
+
+    def test_auto_match_links_media_and_stores_poster(self) -> None:
+        class FakeTmdb:
+            configured = True
+
+            def search(self, item):
+                return [{
+                    "tmdb_id": 232905, "media_type": "movie", "title": "邪不压正", "score": 0.95,
+                    "release_date": "2018-07-13",
+                    "payload": {"id": 232905, "title": "邪不压正", "release_date": "2018-07-13",
+                                "poster_path": "/yhBc.jpg", "media_type": "movie"},
+                    "match_evidence": {"title_exact": True, "primary_title_exact": True, "year_exact": True},
+                }]
+
+            def details(self, media_type, tmdb_id):
+                return {"id": tmdb_id, "tmdb_id": tmdb_id, "media_type": media_type, "title": "邪不压正",
+                        "release_date": "2018-07-13", "poster_path": "/yhBc.jpg", "overview": "北洋年间"}
+
+            def imdb_fallback(self, item, client=None):
+                return {"candidates": [], "evidence": None}
+
+        with patch("backend.ingestion.TmdbClient", FakeTmdb):
+            result = _auto_match_media({self.media_id}, self.db_path)
+        self.assertEqual(result, {self.media_id: "matched"})
+        with connect(self.db_path) as db:
+            row = db.execute(
+                "SELECT tmdb_status, tmdb_id, poster_path FROM media_items WHERE id=?", (self.media_id,)
+            ).fetchone()
+        self.assertEqual((row["tmdb_status"], row["tmdb_id"], row["poster_path"]), ("matched", 232905, "/yhBc.jpg"))
+
+    def test_auto_match_failure_is_recorded_instead_of_silent(self) -> None:
+        with patch("backend.ingestion.TmdbClient") as client_cls, \
+                patch("backend.ingestion.search_media", side_effect=RuntimeError("boom")):
+            client_cls.return_value.configured = True
+            result = _auto_match_media({self.media_id}, self.db_path)
+        self.assertEqual(result, {self.media_id: "error"})
+        with connect(self.db_path) as db:
+            row = db.execute(
+                "SELECT tmdb_status, last_tmdb_error FROM media_items WHERE id=?", (self.media_id,)
+            ).fetchone()
+        self.assertEqual(row["tmdb_status"], "error")
+        self.assertIn("boom", row["last_tmdb_error"] or "")
+
+    def person_media_id(self) -> int:
+        import_content("person", "person.txt", db_path=self.db_path, parsed_sources=[ParsedSource(
+            source_type="115", provider="115", source_key="115:person", title="浅野心", year=None,
+            media_type="unknown", raw_label="浅野心", raw_text="👤 浅野心",
+            url="https://115.com/s/person", resource_kind="person", metadata={"context": "👤 浅野心"})])
+        with connect(self.db_path) as db:
+            return int(db.execute("SELECT id FROM media_items WHERE resource_kind='person'").fetchone()[0])
+
+    def test_person_media_is_skipped_by_auto_match(self) -> None:
+        person_id = self.person_media_id()
+        with patch("backend.ingestion.TmdbClient") as client_cls, \
+                patch("backend.ingestion.search_media") as matcher:
+            client_cls.return_value.configured = True
+            result = _auto_match_media({person_id}, self.db_path)
+        matcher.assert_not_called()
+        self.assertEqual(result, {person_id: "skipped_person"})
+        with connect(self.db_path) as db:
+            row = db.execute("SELECT tmdb_status FROM media_items WHERE id=?", (person_id,)).fetchone()
+        self.assertEqual(row["tmdb_status"], "pending")
+
+    def test_pending_media_ids_excludes_person_entries(self) -> None:
+        person_id = self.person_media_id()
+        ids = pending_media_ids(10, self.db_path)
+        self.assertIn(self.media_id, ids)
+        self.assertNotIn(person_id, ids)
+
+    def test_pending_media_ids_retries_errors_before_review(self) -> None:
+        # 网络失败（error）重试有机会成功；review 重跑通常还是 review，
+        # 所以 error 必须排在 review 前面，否则小批次补试永远轮不到它。
+        with connect(self.db_path) as db:
+            db.execute("UPDATE media_items SET tmdb_status='review' WHERE id=?", (self.media_id,))
+            db.execute(
+                "INSERT INTO media_items (title, normalized_title, media_type, tmdb_status, created_at, updated_at)"
+                " VALUES ('乙', '乙', 'movie', 'error', '2026-01-01', '2026-01-01')"
+            )
+            error_id = int(db.execute("SELECT id FROM media_items WHERE title='乙'").fetchone()[0])
+        ids = pending_media_ids(10, self.db_path)
+        self.assertLess(ids.index(error_id), ids.index(self.media_id))
 
 
 if __name__ == "__main__":

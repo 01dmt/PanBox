@@ -34,7 +34,7 @@ function parseJson(value, fallback = []) {
 }
 
 
-function SourceRow({ source, readOnly = false }) {
+function SourceRow({ source, readOnly = false, onHover }) {
   const [copied, setCopied] = useState(false);
   const metadata = parseJson(source.metadata_json, {});
   const snapshot = metadata?.share_snapshot;
@@ -49,10 +49,19 @@ function SourceRow({ source, readOnly = false }) {
   const seasonLabel = seasonStart != null
     ? `S${String(seasonStart).padStart(2, "0")}${seasonEnd > seasonStart ? `-S${String(seasonEnd).padStart(2, "0")}` : ""}`
     : "";
+  // 区间资源（如 E01-E25）存于 metadata.episode_range，展示完整范围而不只是起始集。
+  const episodeRange = Array.isArray(metadata?.episode_range) && metadata.episode_range.length === 2 ? metadata.episode_range : null;
+  const episodeLabel = source.episode != null
+    ? episodeRange && Number(episodeRange[1]) > Number(source.episode)
+      ? `E${String(source.episode).padStart(2, "0")}-E${String(Number(episodeRange[1])).padStart(2, "0")}`
+      : `E${String(source.episode).padStart(2, "0")}`
+    : "";
   const isCloudShare = ["115", "123", "guangya"].includes(source.source_type);
 
   return (
-    <div className="source-row">
+    <div className="source-row"
+         onMouseEnter={onHover ? () => onHover(source.id) : undefined}
+         onMouseLeave={onHover ? () => onHover(null) : undefined}>
       <span className={`source-icon source-${source.source_type}`}>
         {isCloudShare ? <Link2 size={16} /> : <FileVideo2 size={16} />}
       </span>
@@ -61,7 +70,7 @@ function SourceRow({ source, readOnly = false }) {
         <span>
           {source.source_type}
           {source.file_size ? ` · ${formatBytes(source.file_size)}` : ""}
-          {source.season != null ? ` · ${seasonLabel}${source.episode != null ? `E${String(source.episode).padStart(2, "0")}` : " · 整季"}` : ""}
+          {source.season != null ? ` · ${seasonLabel}${source.episode != null ? episodeLabel : " · 整季"}` : ""}
         </span>
         <small>{isCloudShare ? maskedSource(source.url) : source.ed2k_hash}</small>
         {searchNames.length ? <small className="source-match-hint">内容：{searchNames.slice(0, 2).join(" · ")}</small> : null}
@@ -82,7 +91,128 @@ function SourceRow({ source, readOnly = false }) {
 }
 
 
-function EpisodeResourceGroup({ sources }) {
+function sourceCoversEpisodes(source) {
+  // 返回该来源覆盖的集号集合：整季包返回 null（表示整季），区间/单集返回数字数组。
+  if (source.episode == null) return null;
+  const metadata = parseJson(source.metadata_json, {});
+  const range = Array.isArray(metadata?.episode_range) && metadata.episode_range.length === 2 ? metadata.episode_range : null;
+  const start = Number(source.episode);
+  const end = range ? Math.max(Number(range[1]), start) : start;
+  const episodes = [];
+  for (let episode = start; episode <= end; episode += 1) episodes.push(episode);
+  return episodes;
+}
+
+
+// 区间资源的横线颜色盘：重叠区间（如 1-5 与 2-7）用不同颜色区分不同链接。
+const RANGE_COLORS = ["#7c5cfc", "#e0678b", "#2f9e8f", "#d9862b", "#4a7fd4", "#b0573f"];
+
+
+function sourceCoverage(source) {
+  // 整季包返回 episodes: null；单集/区间返回集号数组与类型（kind: single | range）。
+  if (source.episode == null) return { episodes: null, kind: "pack" };
+  const metadata = parseJson(source.metadata_json, {});
+  const range = Array.isArray(metadata?.episode_range) && metadata.episode_range.length === 2 ? metadata.episode_range : null;
+  const start = Number(source.episode);
+  const end = range ? Math.max(Number(range[1]), start) : start;
+  const episodes = [];
+  for (let episode = start; episode <= end; episode += 1) episodes.push(episode);
+  return { episodes, kind: end > start ? "range" : "single" };
+}
+
+
+function EpisodeCoverageGrid({ group, tmdbTotal, spotlight }) {
+  // 集数格子：已有的高亮、缺的灰色；整季包按 TMDB 基准记为整季覆盖。
+  // 标记：● 该集有专门单集资源；▬ 区间资源（按链接着色，重叠时堆叠）；无标记 = 仅整季包。
+  // spotlight 为悬停中的来源 id：对应格子加描边，其余变暗。
+  const { cells, coverageBySource } = useMemo(() => {
+    const owned = new Map();
+    const coverageBySource = new Map();
+    let maxOwned = 0;
+    let rangeIndex = 0;
+    const mark = (episode, source, kind, colorIndex) => {
+      maxOwned = Math.max(maxOwned, episode);
+      if (!owned.has(episode)) owned.set(episode, { owners: [], kinds: new Set(), ranges: [] });
+      const cell = owned.get(episode);
+      cell.owners.push(source.filename || source.raw_label || source.source_type);
+      cell.kinds.add(kind);
+      if (kind === "range") cell.ranges.push(colorIndex);
+    };
+    for (const source of group.episodes) {
+      const { episodes, kind } = sourceCoverage(source);
+      const colorIndex = kind === "range" ? rangeIndex++ % RANGE_COLORS.length : null;
+      const covered = new Set();
+      for (const episode of episodes || []) {
+        covered.add(episode);
+        mark(episode, source, kind, colorIndex);
+      }
+      coverageBySource.set(source.id, covered);
+    }
+    const total = Math.max(tmdbTotal || 0, maxOwned);
+    const packCovered = new Set(Array.from({ length: total }, (_, index) => index + 1));
+    for (const source of group.packs) coverageBySource.set(source.id, packCovered);
+    const cells = Array.from({ length: total }, (_, index) => {
+      const episode = index + 1;
+      const packOwned = group.packs.length > 0 && (tmdbTotal ? episode <= tmdbTotal : true);
+      const cell = owned.get(episode);
+      const owners = cell?.owners || [];
+      const kinds = cell?.kinds || new Set();
+      return { episode, owned: packOwned || owners.length > 0, owners, packOwned, single: kinds.has("single"), ranges: cell?.ranges || [] };
+    });
+    return { cells, coverageBySource };
+  }, [group, tmdbTotal]);
+  if (!cells.length) return null;
+  const hasMarkers = cells.some((cell) => cell.single || cell.ranges.length);
+  const spotlightSet = spotlight != null ? coverageBySource.get(spotlight) : null;
+  return <>
+    <div className="episode-grid" role="list" aria-label="集数覆盖">
+      {cells.map((cell) => {
+        const kindHint = cell.single ? "单集资源" : cell.ranges.length ? "区间资源" : cell.packOwned ? "整季包覆盖" : null;
+        const hint = cell.owners.length
+          ? `E${String(cell.episode).padStart(2, "0")} · ${kindHint} · ${cell.owners.slice(0, 2).join("、")}`
+          : cell.packOwned
+            ? `E${String(cell.episode).padStart(2, "0")} · 整季包覆盖`
+            : `E${String(cell.episode).padStart(2, "0")} · 缺失`;
+        const spotlighted = spotlightSet ? spotlightSet.has(cell.episode) : false;
+        const className = `episode-cell ${cell.owned ? "owned" : "missing"}${spotlightSet ? (spotlighted ? " spotlight" : " dimmed") : ""}`;
+        return <span key={cell.episode} role="listitem" className={className} title={hint}>
+          {String(cell.episode).padStart(2, "0")}
+          {cell.single ? <i className="episode-dot" aria-hidden="true" /> : null}
+          {cell.ranges.map((colorIndex, stack) => (
+            <i key={colorIndex} className="episode-range-mark" aria-hidden="true"
+               style={{ background: RANGE_COLORS[colorIndex], bottom: `${(cell.single ? 6 : 2.5) + stack * 3}px` }} />
+          ))}
+        </span>;
+      })}
+    </div>
+    {hasMarkers ? <p className="episode-legend"><span><i className="episode-dot" aria-hidden="true" /> 单集</span><span><i className="episode-range-mark" style={{ background: RANGE_COLORS[0] }} aria-hidden="true" /><i className="episode-range-mark" style={{ background: RANGE_COLORS[1] }} aria-hidden="true" /> 区间（颜色区分链接）</span><span>无标记 = 仅整季包</span></p> : null}
+  </>;
+}
+
+
+function compressEpisodeRanges(numbers) {
+  const sorted = [...new Set(numbers)].sort((a, b) => a - b);
+  const ranges = [];
+  let start = null;
+  let prev = null;
+  const flush = () => {
+    if (start === null) return;
+    ranges.push(start === prev
+      ? `E${String(start).padStart(2, "0")}`
+      : `E${String(start).padStart(2, "0")}-E${String(prev).padStart(2, "0")}`);
+  };
+  for (const episode of sorted) {
+    if (start === null) { start = prev = episode; continue; }
+    if (episode === prev + 1) { prev = episode; continue; }
+    flush();
+    start = prev = episode;
+  }
+  flush();
+  return ranges.join(" ");
+}
+
+
+function EpisodeResourceGroup({ sources, seasonsJson }) {
   const seasons = useMemo(() => {
     const groups = new Map();
     for (const source of sources || []) {
@@ -99,17 +229,40 @@ function EpisodeResourceGroup({ sources }) {
     return [...groups.values()].sort((a, b) => (a.season ?? Infinity) - (b.season ?? Infinity));
   }, [sources]);
   const [active, setActive] = useState("0");
+  const [spotlight, setSpotlight] = useState(null);
   const group = seasons[Number(active)] || seasons[0];
   useEffect(() => { if (seasons.length && Number(active) >= seasons.length) setActive("0"); }, [active, seasons.length]);
   if (!seasons.length) return null;
+  // TMDB 季集基准（seasons_json 在关联时缓存、详情页懒回填）；在播剧以 TMDB 当前值为准。
+  const tmdbSeasons = parseJson(seasonsJson, []);
+  const tmdbTotal = group && group.season != null
+    ? (tmdbSeasons.find((row) => Number(row.season) === group.season)?.episode_count ?? null)
+    : null;
+  const ownedEpisodes = new Set();
+  for (const source of group?.episodes || []) {
+    for (const episode of sourceCoverage(source).episodes || []) ownedEpisodes.add(episode);
+  }
+  const packCount = group?.packs.length || 0;
+  const ownedSummary = packCount && tmdbTotal
+    ? `已拥有整季 ${tmdbTotal} 集`
+    : ownedEpisodes.size
+      ? `已拥有 ${ownedEpisodes.size} 集（${compressEpisodeRanges(ownedEpisodes)}）`
+      : packCount ? "整季资源（TMDB 集数未知）" : "暂无集数资源";
   return <div className="season-resources">
     <div className="season-tabs" role="tablist" aria-label="选择季度">
       {seasons.map((season, index) => <button key={String(season.season)} type="button" role="tab" aria-selected={String(index) === active} className={String(index) === active ? "active" : ""} onClick={() => setActive(String(index))}>
         {season.season === null ? "未分类" : `第 ${season.season}${season.seasonEnd ? `-${season.seasonEnd}` : ""} 季`} <small>{season.packs.length ? `${season.packs.length} 整季` : ""}{season.packs.length && season.episodes.length ? " · " : ""}{season.episodes.length ? `${season.episodes.length} 集` : ""}</small>
       </button>)}
     </div>
-    {group?.packs.length ? <div className="season-resource-block"><h4>整季资源</h4>{group.packs.map((source) => <SourceRow source={source} key={source.id} />)}</div> : null}
-    {group?.episodes.length ? <div className="season-resource-block"><h4>单集资源</h4>{[...group.episodes].sort((a, b) => (a.episode ?? 0) - (b.episode ?? 0)).map((source) => <SourceRow source={source} key={source.id} />)}</div> : null}
+    {group && group.season != null ? <>
+      <p className="season-summary">
+        {tmdbTotal ? `TMDB 共 ${tmdbTotal} 集` : "TMDB 集数未知"} · {ownedSummary}
+        {packCount && ownedEpisodes.size ? ` · ${packCount} 个整季包` : ""}
+      </p>
+      <EpisodeCoverageGrid group={group} tmdbTotal={tmdbTotal} spotlight={spotlight} />
+    </> : null}
+    {group?.packs.length ? <div className="season-resource-block"><h4>整季资源</h4>{group.packs.map((source) => <SourceRow source={source} key={source.id} onHover={setSpotlight} />)}</div> : null}
+    {group?.episodes.length ? <div className="season-resource-block"><h4>单集资源</h4>{[...group.episodes].sort((a, b) => (a.episode ?? 0) - (b.episode ?? 0)).map((source) => <SourceRow source={source} key={source.id} onHover={setSpotlight} />)}</div> : null}
     {!group?.packs.length && !group?.episodes.length ? <p className="source-empty">该季暂无资源</p> : null}
   </div>;
 }
@@ -301,7 +454,7 @@ export default function Inspector({
             <div className="section-title">
               <h3>来源记录 <span>{matchingSources?.length ?? 0}{matchingSources?.length < item.source_count ? ` / 共 ${item.source_count}` : ""}</span></h3>
             </div>
-                    {item.media_type === "tv" ? <EpisodeResourceGroup key={item.id} sources={matchingSources} /> : <div className="source-list">
+                    {item.media_type === "tv" ? <EpisodeResourceGroup key={item.id} sources={matchingSources} seasonsJson={item.seasons_json} /> : <div className="source-list">
               {visibleSources?.map((source) => <SourceRow source={source} readOnly={readOnly} key={source.id} />)}
             </div>}
             {!matchingSources?.length ? <p className="source-empty">暂无符合条件的来源</p> : null}

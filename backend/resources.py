@@ -70,6 +70,7 @@ def _present(row):
             'tmdb_status': row['recognition_status'], 'tmdb_id': row['tmdb_id'] if row['recognition_status']=='matched' else None,
             'tmdb_title': redact(row['tmdb_title']), 'poster_path': row['poster_path'] if row['recognition_status']=='matched' else None,
             'channel': redact(row['channel']), 'url_masked': masked_url(row['url']),
+            'access_code': access_code(row['url']),
             'access_code_masked': '****' if access_code(row['url']) else '', 'summary': summary}
 
 

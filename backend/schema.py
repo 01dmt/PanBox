@@ -4,6 +4,7 @@ import os
 import json
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -16,6 +17,18 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
     name TEXT PRIMARY KEY
+);
+
+-- 系列（如「霍比特人」「007」）：频道给系列里的每一部单独发一条消息，标题只写系列名，
+-- 片名藏在发布文件名里。作品仍按单片入库并各自关联 TMDB，这里只负责把它们聚成一条系列。
+CREATE TABLE IF NOT EXISTS media_series (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    normalized_title TEXT NOT NULL UNIQUE,
+    tmdb_collection_id INTEGER,
+    poster_path TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS media_items (
@@ -44,6 +57,9 @@ CREATE TABLE IF NOT EXISTS media_items (
     match_confidence REAL,
     match_method TEXT,
     last_tmdb_error TEXT,
+    series_id INTEGER REFERENCES media_series(id),
+    -- 整包分享：一条 115 分享里装了整个系列（目录内容没法列举），不能当成某一部片。
+    is_bundle INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -223,6 +239,222 @@ def _migrate_resource_headings(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO schema_migrations(name) VALUES (?)", (migration,))
 
 
+def _merge_duplicate_person_entries(connection: sqlite3.Connection) -> None:
+    """把清洗标题后同名的重复人物条目合并成一条，来源挂到保留条目上。"""
+    groups = connection.execute(
+        """SELECT normalized_title FROM media_items
+           WHERE resource_kind='person' AND normalized_title != ''
+           GROUP BY normalized_title HAVING COUNT(*) > 1"""
+    ).fetchall()
+    for group in groups:
+        rows = connection.execute(
+            "SELECT * FROM media_items WHERE resource_kind='person' AND normalized_title=? ORDER BY id",
+            (group["normalized_title"],),
+        ).fetchall()
+        keep = dict(rows[0])
+        keep_meta = {}
+        try:
+            keep_meta = json.loads(keep.get("resource_metadata_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            keep_meta = {}
+        for dup in rows[1:]:
+            connection.execute("UPDATE source_records SET media_id=? WHERE media_id=?", (keep["id"], dup["id"]))
+            connection.execute("UPDATE ingestion_links SET media_id=? WHERE media_id=?", (keep["id"], dup["id"]))
+            connection.execute("UPDATE OR IGNORE tmdb_candidates SET media_id=? WHERE media_id=?", (keep["id"], dup["id"]))
+            connection.execute("UPDATE OR IGNORE imdb_lookups SET media_id=? WHERE media_id=?", (keep["id"], dup["id"]))
+            if not keep_meta:
+                try:
+                    dup_meta = json.loads(dup["resource_metadata_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    dup_meta = {}
+                if dup_meta:
+                    connection.execute(
+                        "UPDATE media_items SET resource_metadata_json=? WHERE id=?",
+                        (json.dumps(dup_meta, ensure_ascii=False), keep["id"]),
+                    )
+                    keep_meta = dup_meta
+            for event in connection.execute("SELECT id, media_ids_json FROM ingestion_events").fetchall():
+                try:
+                    ids = json.loads(event["media_ids_json"] or "[]")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(ids, list) or dup["id"] not in ids:
+                    continue
+                merged = sorted({keep["id"] if value == dup["id"] else value for value in ids})
+                connection.execute(
+                    "UPDATE ingestion_events SET media_ids_json=? WHERE id=?",
+                    (json.dumps(merged), event["id"]),
+                )
+            connection.execute("DELETE FROM media_items WHERE id=?", (dup["id"],))
+
+
+def _migrate_person_entries(connection: sqlite3.Connection) -> None:
+    """人物条目按名字聚合：清洗标题、去掉生日年份、合并重复人物条目。
+
+    历史数据里人物名可能带尾随标点（「浅野心，」），生日年份被当成作品年份
+    存进了 year；不清洗会让同一个人裂成多个条目，无法在人物分类里聚合。
+    """
+    from .importers import normalize_title
+    from .resource_metadata import clean_person_name
+
+    migration = "person_entries_aggregation_v1"
+    if connection.execute("SELECT 1 FROM schema_migrations WHERE name=?", (migration,)).fetchone():
+        return
+    for row in connection.execute("SELECT id, title FROM media_items WHERE resource_kind='person'").fetchall():
+        cleaned = clean_person_name(row["title"])
+        normalized = normalize_title(cleaned) if cleaned else ""
+        if normalized:
+            connection.execute(
+                "UPDATE media_items SET title=?, normalized_title=?, year=NULL WHERE id=?",
+                (cleaned, normalized, row["id"]),
+            )
+        else:
+            connection.execute("UPDATE media_items SET year=NULL WHERE id=?", (row["id"],))
+    connection.execute("UPDATE source_records SET parsed_year=NULL WHERE resource_class='person'")
+    _merge_duplicate_person_entries(connection)
+    connection.execute("INSERT INTO schema_migrations(name) VALUES (?)", (migration,))
+
+
+def _migrate_person_message_attribution(connection: sqlite3.Connection) -> None:
+    """历史人物消息重新归属：人物简介消息解析出的资源全部挂到人物条目。
+
+    旧解析器不看消息级的「👤 人物名」标题，会把同一人物的作品按年份拆成多条
+    普通影视条目（例如「浅野心」裂成 2023/2024/2025/2026 多条）。这里按消息
+    重新归属：消息内全部来源移动到清洗后姓名对应的人物条目，事件与链接同步
+    改指，清空后的占位影视条目删除。规则只作用于 lsp115 人物频道，与其他频道
+    的 👤 标题保持隔离。
+    """
+    from .importers import normalize_title
+    from .resource_metadata import clean_person_name
+
+    migration = "person_message_attribution_v1"
+    if connection.execute("SELECT 1 FROM schema_migrations WHERE name=?", (migration,)).fetchone():
+        return
+
+    # 懒加载，避免 schema 与 ingestion 的模块级循环导入。
+    from .ingestion import _is_person_resource_channel, _lsp115_person_context
+
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # 人物条目本身不承载作品年份，媒体类型统一为 unknown。
+    connection.execute("UPDATE media_items SET media_type='unknown', year=NULL WHERE resource_kind='person'")
+    events = connection.execute(
+        """SELECT id, service, channel_username, channel_name, message_url, raw_text
+           FROM ingestion_events
+           WHERE raw_text LIKE '%👤%'
+             AND (lower(replace(replace(coalesce(channel_username,''),'@',''),' ',''))='lsp115'
+                  OR replace(replace(coalesce(channel_name,''),' ',''),'　','')='115网盘资源分享频道'
+                  OR coalesce(message_url,'') LIKE '%/lsp115/%')"""
+    ).fetchall()
+    for event in events:
+        source_info = dict(event)
+        if not _is_person_resource_channel(source_info):
+            continue
+        context = _lsp115_person_context(event["raw_text"], source_info)
+        if not context:
+            continue
+        name = clean_person_name(context.splitlines()[0])
+        normalized = normalize_title(name)
+        if not normalized:
+            continue
+        links = connection.execute(
+            "SELECT id, source_key, media_id FROM ingestion_links WHERE ingestion_id=? AND source_key IS NOT NULL",
+            (event["id"],),
+        ).fetchall()
+        link_keys = [link["source_key"] for link in links if link["source_key"]]
+        if not link_keys:
+            continue
+        rows = connection.execute(
+            "SELECT id, source_key, media_id FROM source_records WHERE source_key IN (%s)"
+            % ",".join("?" * len(link_keys)),
+            link_keys,
+        ).fetchall()
+        if not rows:
+            continue
+
+        person = connection.execute(
+            "SELECT id FROM media_items WHERE resource_kind='person' AND normalized_title=? ORDER BY id LIMIT 1",
+            (normalized,),
+        ).fetchone()
+        person_id = int(person["id"]) if person else None
+        if person_id is None:
+            # 该消息的来源恰好只落在一条普通条目上时，提升该条目并保留 id。
+            media_ids = {row["media_id"] for row in rows}
+            if len(media_ids) == 1:
+                candidate_id = next(iter(media_ids))
+                total = connection.execute(
+                    "SELECT COUNT(*) FROM source_records WHERE media_id=?", (candidate_id,)
+                ).fetchone()[0]
+                if total == len(rows):
+                    connection.execute(
+                        """UPDATE media_items SET title=?, normalized_title=?, year=NULL,
+                           media_type='unknown', resource_kind='person' WHERE id=?""",
+                        (name, normalized, candidate_id),
+                    )
+                    person_id = int(candidate_id)
+        if person_id is None:
+            cursor = connection.execute(
+                """INSERT INTO media_items
+                   (title, normalized_title, year, media_type, resource_kind, resource_metadata_json, created_at, updated_at)
+                   VALUES (?, ?, NULL, 'unknown', 'person', '{}', ?, ?)""",
+                (name, normalized, now, now),
+            )
+            person_id = int(cursor.lastrowid)
+
+        by_key = {row["source_key"]: row for row in rows}
+        previous_media_ids: set[int] = set()
+        for link in links:
+            row = by_key.get(link["source_key"])
+            if row is not None:
+                previous_media_ids.add(int(row["media_id"]))
+                connection.execute(
+                    "UPDATE source_records SET media_id=?, resource_class='person', parsed_year=NULL WHERE id=?",
+                    (person_id, row["id"]),
+                )
+            if link["media_id"] is not None:
+                previous_media_ids.add(int(link["media_id"]))
+            connection.execute("UPDATE ingestion_links SET media_id=? WHERE id=?", (person_id, link["id"]))
+        connection.execute(
+            "UPDATE ingestion_events SET media_ids_json=? WHERE id=?",
+            (json.dumps([person_id]), event["id"]),
+        )
+        # 清空后没有来源、也没有 TMDB 身份的占位条目才删除；人物条目保留。
+        for media_id in previous_media_ids - {person_id}:
+            connection.execute(
+                """DELETE FROM media_items
+                   WHERE id=? AND resource_kind != 'person' AND tmdb_id IS NULL
+                     AND tmdb_status != 'matched'
+                     AND NOT EXISTS (SELECT 1 FROM source_records WHERE media_id=media_items.id)""",
+                (media_id,),
+            )
+    connection.execute("INSERT INTO schema_migrations(name) VALUES (?)", (migration,))
+
+
+def _migrate_person_tmdb_state(connection: sqlite3.Connection) -> None:
+    """人物条目不是 TMDB 影视作品：清掉历史匹配错误与候选状态。
+
+    旧流程会把人物名当作品送去 TMDB 匹配，失败后写入 tmdb_status='error'，
+    资源库因此给人物资源显示「匹配错误」。人物条目不再参与匹配，这里把历史
+    状态复位为 pending，并清理人物条目下的候选与 IMDb 附属数据。
+    """
+    migration = "person_tmdb_state_reset_v1"
+    if connection.execute("SELECT 1 FROM schema_migrations WHERE name=?", (migration,)).fetchone():
+        return
+    connection.execute(
+        """UPDATE media_items SET tmdb_status='pending', tmdb_id=NULL, tmdb_media_type=NULL,
+           tmdb_title=NULL, original_title=NULL, overview=NULL, poster_path=NULL, backdrop_path=NULL,
+           release_date=NULL, vote_average=NULL, genres_json=NULL, origin_country_json=NULL,
+           match_confidence=NULL, match_method=NULL, last_tmdb_error=NULL, seasons_json=NULL
+           WHERE resource_kind='person'"""
+    )
+    connection.execute(
+        "DELETE FROM tmdb_candidates WHERE media_id IN (SELECT id FROM media_items WHERE resource_kind='person')"
+    )
+    connection.execute(
+        "DELETE FROM imdb_lookups WHERE media_id IN (SELECT id FROM media_items WHERE resource_kind='person')"
+    )
+    connection.execute("INSERT INTO schema_migrations(name) VALUES (?)", (migration,))
+
+
 def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
     path = resolve_db_path(db_path)
     with connect(path) as connection:
@@ -248,6 +480,14 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
             connection.execute("ALTER TABLE media_items ADD COLUMN resource_kind TEXT NOT NULL DEFAULT 'media'")
         if "resource_metadata_json" not in media_columns:
             connection.execute("ALTER TABLE media_items ADD COLUMN resource_metadata_json TEXT NOT NULL DEFAULT '{}'")
+        if "seasons_json" not in media_columns:
+            # TMDB 剧集季集基准：[{"season": 1, "episode_count": 12}, ...]，供覆盖格子图使用。
+            connection.execute("ALTER TABLE media_items ADD COLUMN seasons_json TEXT")
+        if "series_id" not in media_columns:
+            connection.execute("ALTER TABLE media_items ADD COLUMN series_id INTEGER REFERENCES media_series(id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_media_series ON media_items(series_id)")
+        if "is_bundle" not in media_columns:
+            connection.execute("ALTER TABLE media_items ADD COLUMN is_bundle INTEGER NOT NULL DEFAULT 0")
         _migrate_resource_headings(connection)
         # Backfill only when introducing the source management fields. Never overwrite user edits.
         if "resource_class" not in columns:
@@ -261,6 +501,9 @@ def init_db(db_path: str | os.PathLike[str] | None = None) -> Path:
                                  WHERE l.source_key=source_records.source_key AND l.status IN ('inserted','duplicate'))
                 WHERE source_type != 'ed2k' AND availability_status='unknown'
                 AND EXISTS (SELECT 1 FROM ingestion_links l WHERE l.source_key=source_records.source_key AND l.status IN ('inserted','duplicate'))""")
+        _migrate_person_entries(connection)
+        _migrate_person_message_attribution(connection)
+        _migrate_person_tmdb_state(connection)
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_provider ON source_records(provider)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_resource_class ON source_records(resource_class)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sources_availability ON source_records(availability_status)")

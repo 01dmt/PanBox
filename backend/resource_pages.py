@@ -100,6 +100,22 @@ def fetch_resource_page(url: str) -> tuple[str | None, str]:
     return _page_title(parser), "\n".join(parts)
 
 
+def supported_page_urls(text: str) -> list[str]:
+    """Return the supported resource pages mentioned in ``text``, in order and de-duplicated.
+
+    Only HTTPS pages on the allowed hosts count, so callers can estimate the
+    network cost of expanding a message without fetching anything.
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in RESOURCE_PAGE_RE.finditer(text):
+        url = _clean_url(match.group(0))
+        if _is_supported_page(url) and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
 def expand_resource_pages(text: str, inherited_heading: str | None = None) -> str:
     """Append source-bearing content from supported resource pages.
 
@@ -111,30 +127,21 @@ def expand_resource_pages(text: str, inherited_heading: str | None = None) -> st
     case the page title must not turn the sources back into ordinary movies or
     TV entries.
     """
-    urls: list[str] = []
-    seen: set[str] = set()
-    for match in RESOURCE_PAGE_RE.finditer(text):
-        url = _clean_url(match.group(0))
-        if _is_supported_page(url) and url not in seen:
-            seen.add(url)
-            urls.append(url)
+    urls = supported_page_urls(text)
     if not urls:
         return text
 
     sections = [text]
     queue = list(urls)
+    seen = set(urls)
     while queue:
         url = queue.pop(0)
         try:
             title, page_text = fetch_resource_page(url)
         except Exception:
             continue
-        nested = []
-        for match in RESOURCE_PAGE_RE.finditer(page_text):
-            nested_url = _clean_url(match.group(0))
-            if _is_supported_page(nested_url) and nested_url not in seen:
-                seen.add(nested_url)
-                nested.append(nested_url)
+        nested = [nested_url for nested_url in supported_page_urls(page_text) if nested_url not in seen]
+        seen.update(nested)
         source_lines = [line for line in page_text.splitlines() if _is_supported_source(line)]
         queue.extend(nested)
         if not source_lines and not nested:

@@ -9,7 +9,7 @@ from typing import Any, Iterable, Optional
 
 from .importers import ParsedSource, content_digest, detect_source_kind, iter_sources, normalize_title
 from .schema import connect, init_db
-from .resource_metadata import infer_class
+from .resource_metadata import clean_person_name, infer_class
 from .telegram_avatar import cache_channel_avatar, normalize_channel_username
 
 
@@ -28,6 +28,15 @@ def _compatible_media(
     normalized = normalize_title(source.title)
     if not normalized:
         return None
+
+    if source.resource_kind == "person":
+        # 人物条目按名字聚合：忽略年份（生日/文件名年份会让同一人裂成多条），
+        # 优先命中已有人物条目；找不到时允许把同名占位条目提升为人物。
+        rows = connection.execute(
+            "SELECT * FROM media_items WHERE normalized_title = ? ORDER BY resource_kind != 'person', id",
+            (normalized,),
+        ).fetchall()
+        return rows[0] if rows else None
 
     if source.year is not None:
         rows = connection.execute(
@@ -61,9 +70,54 @@ def _compatible_media(
     return None
 
 
+def ensure_series(connection: sqlite3.Connection, title: str) -> int:
+    """按系列名归档，返回系列 id。
+
+    频道给系列里的每一部单独发消息（标题只写「📺 007(系列)」），片名只存在于发布文件名里，
+    所以作品仍是单片、各自关联 TMDB，系列只是它们的集合视图。
+    """
+    normalized = normalize_title(title)
+    now = utc_now()
+    row = connection.execute(
+        "SELECT id FROM media_series WHERE normalized_title = ?", (normalized,)
+    ).fetchone()
+    if row:
+        return int(row["id"])
+    cursor = connection.execute(
+        "INSERT INTO media_series (title, normalized_title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        (title, normalized, now, now),
+    )
+    return int(cursor.lastrowid)
+
+
+def attach_series(connection: sqlite3.Connection, media_id: int, title: str) -> int | None:
+    """把作品挂到系列上；没有系列标记时不动。"""
+    if not title:
+        return None
+    series_id = ensure_series(connection, title)
+    connection.execute(
+        "UPDATE media_items SET series_id = ?, updated_at = ? WHERE id = ? AND (series_id IS NULL OR series_id != ?)",
+        (series_id, utc_now(), media_id, series_id),
+    )
+    return series_id
+
+
+def is_bundle_source(source: ParsedSource) -> bool:
+    """整包分享：带系列标记、又只有分享链接没有文件名的消息。
+
+    频道通常一集/一部一条 ED2K（文件名能认出是哪一部）；只有整系列打成一个 115 分享时
+    才拿不到文件名。115 目录列举已按风控关闭，拆不出成员，所以这种记录不能按单片匹配，
+    否则会把「整个系列」错绑到其中某一部上。
+    """
+    if not source.metadata.get("collection"):
+        return False
+    return not str(source.filename or "").strip()
+
+
 def ensure_media(connection: sqlite3.Connection, source: ParsedSource) -> int:
     existing = _compatible_media(connection, source)
     now = utc_now()
+    is_bundle = 1 if is_bundle_source(source) else 0
     if existing:
         media_type = existing["media_type"]
         if media_type == "unknown" and source.media_type != "unknown":
@@ -75,30 +129,52 @@ def ensure_media(connection: sqlite3.Connection, source: ParsedSource) -> int:
         # still promote an unclassified placeholder.
         if resource_kind == "media" and source.resource_kind in {"person", "series"}:
             resource_kind = source.resource_kind
+        if resource_kind == "person":
+            # 人物条目不保留年份：生日年份不是作品年份，还会拆散同一人物的聚合。
+            year = None
         connection.execute(
-            "UPDATE media_items SET media_type = ?, resource_kind = ?, year = ?, updated_at = ? WHERE id = ?",
-            (media_type, resource_kind, year, now, existing["id"]),
+            "UPDATE media_items SET media_type = ?, resource_kind = ?, year = ?,"
+            " is_bundle = MAX(is_bundle, ?), updated_at = ? WHERE id = ?",
+            (media_type, resource_kind, year, is_bundle, now, existing["id"]),
         )
+        _attach_collection(connection, int(existing["id"]), source)
         return int(existing["id"])
 
+    is_person = source.resource_kind == "person"
+    # 人物条目在入库侧也清洗标题、去掉年份（解析层已处理，这里兜底），
+    # 保证聚合键稳定：「浅野心，」和「浅野心」必须落进同一条目。
+    title = (clean_person_name(source.title) or source.title) if is_person else source.title
     cursor = connection.execute(
         """
         INSERT INTO media_items (
-            title, normalized_title, year, media_type, resource_kind, resource_metadata_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            title, normalized_title, year, media_type, resource_kind, resource_metadata_json,
+            is_bundle, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            source.title,
-            normalize_title(source.title),
-            source.year,
+            title,
+            normalize_title(title),
+            None if is_person else source.year,
             source.media_type,
             source.resource_kind,
             json.dumps(source.metadata, ensure_ascii=False),
+            is_bundle,
             now,
             now,
         ),
     )
-    return int(cursor.lastrowid)
+    media_id = int(cursor.lastrowid)
+    _attach_collection(connection, media_id, source)
+    return media_id
+
+
+def _attach_collection(connection: sqlite3.Connection, media_id: int, source: ParsedSource) -> None:
+    """解析层标记了「属于某系列」的作品挂到系列上（人物不参与）。"""
+    if source.resource_kind == "person":
+        return
+    if not source.metadata.get("collection"):
+        return
+    attach_series(connection, media_id, source.title)
 
 
 def insert_source(
@@ -131,7 +207,7 @@ def insert_source(
                 source.season,
                 source.season_end,
                 source.episode,
-                source.year,
+                None if source.resource_kind == "person" else source.year,
                 source.quality,
                 source.codec,
                 source.hdr,
@@ -187,7 +263,7 @@ def _refresh_duplicate_source(
             source.season,
             source.season_end,
             source.episode,
-            source.year,
+            None if source.resource_kind == "person" else source.year,
             source.quality,
             source.codec,
             source.hdr,
@@ -444,6 +520,7 @@ def get_media_filters(db_path: str | Path | None = None) -> dict[str, Any]:
 
 SORTS = {
     "updated_desc": "m.updated_at DESC, m.id DESC",
+    "vote_desc": "m.vote_average IS NULL, m.vote_average DESC, m.updated_at DESC, m.id DESC",
     "title_asc": "m.normalized_title ASC, m.year DESC, m.id DESC",
     "year_desc": "media_year IS NULL, media_year DESC, m.normalized_title ASC, m.id DESC",
     "year_asc": "media_year IS NULL, media_year ASC, m.normalized_title ASC, m.id DESC",
@@ -457,6 +534,7 @@ def list_media(
     query: str = "",
     status: str = "all",
     media_type: str = "all",
+    category: str = "all",
     resource_kind: str = "all",
     source_type: str = "all",
     availability: str = "all",
@@ -541,12 +619,22 @@ def list_media(
     if media_type in {"movie", "tv", "unknown"}:
         where.append("m.media_type = ?")
         params.append(media_type)
+    if category == "anime":
+        where.append(f"EXISTS (SELECT 1 FROM json_each({GENRES_SQL}) genre WHERE json_extract({GENRE_VALUE_SQL}, '$.id') = 16)")
+    elif category in {"documentary", "doc"}:
+        where.append(f"EXISTS (SELECT 1 FROM json_each({GENRES_SQL}) genre WHERE json_extract({GENRE_VALUE_SQL}, '$.id') = 99)")
+    elif category == "variety":
+        where.append(f"EXISTS (SELECT 1 FROM json_each({GENRES_SQL}) genre WHERE json_extract({GENRE_VALUE_SQL}, '$.id') IN (10764, 10767))")
+    elif category in {"drama", "series"}:
+        where.append(f"NOT EXISTS (SELECT 1 FROM json_each({GENRES_SQL}) genre WHERE json_extract({GENRE_VALUE_SQL}, '$.id') IN (16, 99, 10764, 10767))")
     if resource_kind in {"media", "person", "series"}:
         where.append("m.resource_kind = ?")
         params.append(resource_kind)
 
     if year == "unknown":
         where.append(f"{MEDIA_YEAR_SQL} IS NULL")
+    elif year == "earlier":
+        where.append(f"{MEDIA_YEAR_SQL} < 2007")
     elif year != "all":
         decade = isinstance(year, str) and year.endswith("0s")
         number = year[:-1] if decade else str(year)
@@ -555,15 +643,30 @@ def list_media(
         where.append(f"{MEDIA_YEAR_SQL} BETWEEN ? AND ?")
         params.extend([int(number), int(number) + (9 if decade else 0)])
     if genre != "all":
-        if not re.fullmatch(r"[1-9][0-9]{0,7}", str(genre)):
+        if re.fullmatch(r"[1-9][0-9]{0,7}", str(genre)):
+            where.append(f"EXISTS (SELECT 1 FROM json_each({GENRES_SQL}) genre WHERE json_extract({GENRE_VALUE_SQL}, '$.id') = ?)")
+            params.append(int(genre))
+        elif re.fullmatch(r"[\u4e00-\u9fa5A-Za-z0-9 &]{1,20}", str(genre)):
+            where.append(f"EXISTS (SELECT 1 FROM json_each({GENRES_SQL}) genre WHERE json_extract({GENRE_VALUE_SQL}, '$.name') = ?)")
+            params.append(str(genre))
+        else:
             raise ValueError("题材筛选无效。")
-        where.append(f"EXISTS (SELECT 1 FROM json_each({GENRES_SQL}) genre WHERE json_extract({GENRE_VALUE_SQL}, '$.id') = ?)")
-        params.append(int(genre))
     if country != "all":
-        if not isinstance(country, str) or not re.fullmatch(r"[A-Za-z]{2}", country):
+        c_upper = country.strip().lower()
+        western_countries = (
+            "US", "GB", "FR", "DE", "IT", "ES", "CA", "AU", "NZ", "IE", "NL", "SE", "NO", "DK",
+            "FI", "BE", "AT", "CH", "PL", "CZ", "HU", "GR", "PT", "RU", "RO", "UA", "IS", "MX",
+            "BR", "AR", "CL", "CO"
+        )
+        if c_upper in {"europeandamerica", "western", "欧美", "eu_us"}:
+            placeholders = ",".join("?" for _ in western_countries)
+            where.append(f"EXISTS (SELECT 1 FROM json_each({COUNTRIES_SQL}) country WHERE country.type='text' AND UPPER(country.value) IN ({placeholders}))")
+            params.extend(western_countries)
+        elif not isinstance(country, str) or not re.fullmatch(r"[A-Za-z]{2}", country):
             raise ValueError("国家或地区筛选无效。")
-        where.append(f"EXISTS (SELECT 1 FROM json_each({COUNTRIES_SQL}) country WHERE country.type='text' AND UPPER(country.value)=?)")
-        params.append(country.upper())
+        else:
+            where.append(f"EXISTS (SELECT 1 FROM json_each({COUNTRIES_SQL}) country WHERE country.type='text' AND UPPER(country.value)=?)")
+            params.append(country.upper())
 
     # All technical criteria must hold on the same source, not different versions of a work.
     source_where, source_params = [], []
@@ -658,6 +761,62 @@ def get_media_by_tmdb_id(tmdb_id: int, db_path: str | Path | None = None) -> dic
     return get_media(int(row["id"]), db_path) if row else None
 
 
+def list_series(q: str = "", db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    """系列列表：条数、已匹配数、年份跨度，以及一张代表海报（优先已匹配成员）。"""
+    with connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                s.id,
+                s.title,
+                COUNT(m.id) AS media_count,
+                SUM(CASE WHEN m.tmdb_status = 'matched' THEN 1 ELSE 0 END) AS matched_count,
+                MIN(m.year) AS year_from,
+                MAX(m.year) AS year_to,
+                (
+                    SELECT p.poster_path FROM media_items p
+                     WHERE p.series_id = s.id AND p.poster_path IS NOT NULL
+                     ORDER BY (p.tmdb_status = 'matched') DESC, p.id
+                     LIMIT 1
+                ) AS poster_path,
+                s.updated_at
+            FROM media_series s
+            JOIN media_items m ON m.series_id = s.id
+            WHERE (? = '' OR s.title LIKE '%' || ? || '%')
+            GROUP BY s.id
+            ORDER BY media_count DESC, s.title
+            """,
+            (q, q),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_series(series_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
+    with connect(db_path) as connection:
+        series = connection.execute("SELECT * FROM media_series WHERE id = ?", (series_id,)).fetchone()
+        if not series:
+            return None
+        members = connection.execute(
+            """
+            SELECT
+                m.id, m.title, m.year, m.media_type, m.resource_kind, m.tmdb_status, m.tmdb_id,
+                m.tmdb_title, m.poster_path, m.vote_average, m.release_date, m.series_id, m.is_bundle,
+                COUNT(s.id) AS source_count,
+                (
+                    SELECT COALESCE(NULLIF(t.filename, ''), t.raw_label) FROM source_records t
+                     WHERE t.media_id = m.id ORDER BY t.id LIMIT 1
+                ) AS sample_label
+            FROM media_items m
+            LEFT JOIN source_records s ON s.media_id = m.id
+            WHERE m.series_id = ?
+            GROUP BY m.id
+            ORDER BY COALESCE(m.year, 9999), m.id
+            """,
+            (series_id,),
+        ).fetchall()
+    return {**dict(series), "items": [dict(row) for row in members]}
+
+
 def get_media(media_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
     with connect(db_path) as connection:
         connection.execute("BEGIN")
@@ -685,9 +844,14 @@ def get_media(media_id: int, db_path: str | Path | None = None) -> dict[str, Any
 
         sources = connection.execute(
             """
-            SELECT * FROM source_records
-            WHERE media_id = ?
-            ORDER BY source_type, season, episode, id
+            SELECT
+                s.*,
+                (SELECT e.channel_name FROM ingestion_links l JOIN ingestion_events e ON e.id = l.ingestion_id WHERE l.source_key = s.source_key ORDER BY e.received_at DESC LIMIT 1) AS channel_name,
+                (SELECT e.channel_avatar_url FROM ingestion_links l JOIN ingestion_events e ON e.id = l.ingestion_id WHERE l.source_key = s.source_key ORDER BY e.received_at DESC LIMIT 1) AS channel_avatar_url,
+                (SELECT COALESCE(e.published_at, e.received_at) FROM ingestion_links l JOIN ingestion_events e ON e.id = l.ingestion_id WHERE l.source_key = s.source_key ORDER BY e.received_at DESC LIMIT 1) AS published_at
+            FROM source_records s
+            WHERE s.media_id = ?
+            ORDER BY s.source_type, s.season, s.episode, s.id
             """,
             (media_id,),
         ).fetchall()
@@ -955,16 +1119,24 @@ def delete_candidate(
         )
 
 
-def pending_media_ids(limit: int, db_path: str | Path | None = None) -> list[int]:
+def pending_media_ids(
+    limit: int,
+    db_path: str | Path | None = None,
+    *,
+    series_only: bool = False,
+) -> list[int]:
     with connect(db_path) as connection:
         rows = connection.execute(
             """
             SELECT id FROM media_items
-            WHERE tmdb_status != 'matched'
-            ORDER BY CASE tmdb_status WHEN 'pending' THEN 0 WHEN 'review' THEN 1 ELSE 2 END, id
+            WHERE tmdb_status != 'matched' AND resource_kind != 'person' AND is_bundle = 0
+              AND (? = 0 OR series_id IS NOT NULL)
+            -- 顺序：待匹配 → 上次网络失败（重试有可能成功）→ 待确认 → 明确没找到。
+            -- review 重跑通常还是 review，所以不能让它把 error 的补试挤掉。
+            ORDER BY CASE tmdb_status WHEN 'pending' THEN 0 WHEN 'error' THEN 1 WHEN 'review' THEN 2 ELSE 3 END, id
             LIMIT ?
             """,
-            (min(max(limit, 1), 5000),),
+            (1 if series_only else 0, min(max(limit, 1), 5000)),
         ).fetchall()
     return [int(row["id"]) for row in rows]
 
@@ -1012,6 +1184,21 @@ def save_candidates(
             """,
             (status, error, now, media_id),
         )
+        if status == "review":
+            # 候选已生成但尚未人工确认：用最优候选的海报做临时展示，
+            # 正式关联后 link_tmdb 会用官方海报覆盖它。
+            connection.execute(
+                """
+                UPDATE media_items
+                SET poster_path = COALESCE(poster_path, (
+                    SELECT poster_path FROM tmdb_candidates
+                    WHERE media_id = ? AND poster_path IS NOT NULL
+                    ORDER BY score DESC, id LIMIT 1
+                ))
+                WHERE id = ?
+                """,
+                (media_id, media_id),
+            )
 
 
 def merge_media_items(
@@ -1019,6 +1206,16 @@ def merge_media_items(
     remove_id: int,
     connection: sqlite3.Connection,
 ) -> None:
+    # 合并前先接住系列归属：否则「速度与激情(系列)」里的 11 部会因为合并掉重复条目
+    # 只剩下一两部，系列视图凭空少掉作品。
+    removed = connection.execute(
+        "SELECT series_id FROM media_items WHERE id = ?", (remove_id,)
+    ).fetchone()
+    if removed and removed["series_id"] is not None:
+        connection.execute(
+            "UPDATE media_items SET series_id = COALESCE(series_id, ?), updated_at = ? WHERE id = ?",
+            (int(removed["series_id"]), utc_now(), keep_id),
+        )
     connection.execute(
         "UPDATE OR IGNORE source_records SET media_id = ? WHERE media_id = ?",
         (keep_id, remove_id),
@@ -1026,6 +1223,25 @@ def merge_media_items(
     connection.execute("DELETE FROM source_records WHERE media_id = ?", (remove_id,))
     connection.execute("DELETE FROM tmdb_candidates WHERE media_id = ?", (remove_id,))
     connection.execute("DELETE FROM media_items WHERE id = ?", (remove_id,))
+
+
+def extract_tmdb_seasons(details: dict[str, Any]) -> list[dict[str, int]] | None:
+    """提取 TMDB 季集基准 [{season: 1, episode_count: 12}, ...]；没有则返回 None。"""
+    seasons = details.get("seasons")
+    if not isinstance(seasons, list):
+        payload = details.get("payload")
+        seasons = payload.get("seasons") if isinstance(payload, dict) else None
+    if not isinstance(seasons, list):
+        return None
+    rows = []
+    for season in seasons:
+        if not isinstance(season, dict):
+            continue
+        number, count = season.get("season_number"), season.get("episode_count")
+        if isinstance(number, int) and number >= 1 and isinstance(count, int) and count > 0:
+            rows.append({"season": number, "episode_count": count})
+    rows.sort(key=lambda row: row["season"])
+    return rows or None
 
 
 def link_tmdb(
@@ -1120,6 +1336,20 @@ def link_tmdb(
                 )
             merge_media_items(keep_id, remove_id, connection)
             media_id = keep_id
+
+        if media_type == "tv":
+            # 剧集资源默认整季：没有季集线索的来源补记 S01，保证覆盖范围可读。
+            connection.execute(
+                "UPDATE source_records SET season = 1 WHERE media_id = ? AND season IS NULL AND episode IS NULL",
+                (media_id,),
+            )
+            seasons = extract_tmdb_seasons(details)
+            if seasons:
+                # 缓存 TMDB 每季集数基准，详情页的覆盖格子图以此为分母。
+                connection.execute(
+                    "UPDATE media_items SET seasons_json = ? WHERE id = ?",
+                    (json.dumps(seasons, ensure_ascii=False), media_id),
+                )
 
         if canonical_year is not None:
             connection.execute("UPDATE media_items SET year = ? WHERE id = ?", (canonical_year, media_id))

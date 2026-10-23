@@ -15,8 +15,10 @@ from backend.importers import (
     parse_ed2k_link,
     parse_release_aliases,
     parse_release_title,
+    parse_share_heading,
     parse_share_line,
     split_joined_title,
+    strip_search_noise,
 )
 from backend.repository import (
     get_media, get_stats, import_content, link_tmdb, list_media, save_candidates, update_media_fields,
@@ -169,6 +171,33 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual((series.title, series.resource_kind), ("角头", "series"))
         self.assertEqual(series.metadata["resource_metadata"]["included_films"], "角头、角头2")
 
+    def test_person_name_is_cleaned_and_birthday_year_dropped(self) -> None:
+        person = parse_share_line(
+            "🔗 https://115cdn.com/s/person2?password=x",
+            context="👤 浅野心，\n🎂 生日：1994-01-01\n🏠 出生地：日本\n📚 代表作：作品一 / 作品二",
+        )
+        self.assertEqual((person.title, person.year, person.resource_kind), ("浅野心", None, "person"))
+        self.assertEqual(person.metadata["resource_metadata"]["birthday"], "1994-01-01")
+
+    def test_person_context_owns_all_share_lines_regardless_of_label(self) -> None:
+        context = "👤 浅野心"
+        source = parse_share_line(
+            "全部资源 https://123865.com/s/bundle?pwd=abcd",
+            context=context,
+            person_context=context,
+        )
+        self.assertEqual((source.title, source.resource_kind), ("浅野心", "person"))
+        # 没有人物上下文时，非通用标签仍是普通影视标题，行为不变。
+        ordinary = parse_share_line("全部资源 https://123865.com/s/bundle2?pwd=abcd")
+        self.assertEqual(ordinary.resource_kind, "media")
+
+    def test_ed2k_person_context_cleans_name_and_drops_year(self) -> None:
+        source = parse_ed2k_link(
+            "ed2k://|file|浅野心2023合集.zip|40|" + "D" * 32 + "|/",
+            context="👤 浅野心，\n🎂 生日：1994-01-01",
+        )
+        self.assertEqual((source.title, source.year, source.resource_kind), ("浅野心", None, "person"))
+
     def test_preserves_channel_fields_for_manual_scraping(self) -> None:
         source = next(iter_share_sources(
             "📺 毒枭：墨西哥 (2018) S1-S3全集\n"
@@ -215,6 +244,32 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual((source.title, source.year, source.season, source.episode), ("毒枭：墨西哥", 2018, 1, None))
         self.assertEqual(source.season_end, 3)
         self.assertEqual(source.metadata["season_range"], [1, 3])
+        self.assertEqual(source.media_type, "tv")
+
+    def test_channel_emoji_does_not_override_series_evidence(self) -> None:
+        # 有频道给所有投稿（包括剧集全集）统一加 🎬；季集/全集等结构线索必须优先。
+        source = parse_share_line(
+            "🔗 链接： 点击跳转 https://115cdn.com/s/zzrs?password=x#",
+            context="🎬 蒸蒸日上 (2026) 全集",
+        )
+        self.assertEqual((source.title, source.year, source.media_type), ("蒸蒸日上", 2026, "tv"))
+        one_line = parse_share_line("🎬 蒸蒸日上 (2026) 全集\thttps://115cdn.com/s/zzrs?password=x#")
+        self.assertEqual((one_line.title, one_line.year, one_line.media_type), ("蒸蒸日上", 2026, "tv"))
+        movie = parse_share_line("🎬 一般电影 (2026)\thttps://115cdn.com/s/d?password=x#")
+        self.assertEqual(movie.media_type, "movie")
+
+    def test_tv_share_without_episode_defaults_to_season_one(self) -> None:
+        # 没有季集线索的剧集资源默认视为整季：记为 S01（episode 为空）。
+        source = parse_share_line(
+            "🔗 链接： 点击跳转 https://115cdn.com/s/jjc?password=x#",
+            context="📺 剧集：嫁金钗 (2026)",
+        )
+        self.assertEqual((source.media_type, source.season, source.episode), ("tv", 1, None))
+        with_episode = parse_share_line(
+            "🔗 链接： 点击跳转 https://115cdn.com/s/jjc2?password=x#",
+            context="📺 剧集：嫁金钗 (2026) S02E05",
+        )
+        self.assertEqual((with_episode.season, with_episode.episode), (2, 5))
 
     def test_persists_multi_season_end_in_source_record(self) -> None:
         content = "🎬 毒枭：墨西哥 (2018) S1-S3全集\thttps://115cdn.com/s/season-pack?password=o599#"
@@ -438,6 +493,86 @@ class ImporterTests(unittest.TestCase):
             item = get_media(media_id, db_path)
 
         self.assertEqual(item["media_type"], "movie")
+
+
+class ShareHeadingCleaningTests(unittest.TestCase):
+    """字段式消息把标签/集数/画质写进首行，标题必须只取真正的片名。"""
+
+    def test_label_prefix_is_not_part_of_the_title(self) -> None:
+        for heading, expected in (
+            ("名称：飞驰人生2（2024）", "飞驰人生2"),
+            ("名称: 大明王朝1566", "大明王朝1566"),
+            ("资源名称：沙丘2", "沙丘2"),
+            ("片名：疾速追杀4", "疾速追杀4"),
+        ):
+            with self.subTest(heading=heading):
+                self.assertEqual(parse_share_heading(heading)["title"], expected)
+
+    def test_label_prefix_keeps_the_year_from_the_value(self) -> None:
+        self.assertEqual(parse_share_heading("名称：飞驰人生2（2024）")["year"], 2024)
+
+    def test_series_marker_names_the_collection_not_the_film(self) -> None:
+        # 频道给系列里每一部单独发消息，首行只写系列名；标记要保留成「属于哪个系列」。
+        for heading, expected in (
+            ("📺 007(系列)", "007"),
+            ("📺 黑夜传说 (系列)", "黑夜传说"),
+            ("📺 速度与激情（系列）国英双语", "速度与激情"),
+            ("📺 霍比特人（系列", "霍比特人"),
+        ):
+            with self.subTest(heading=heading):
+                details = parse_share_heading(heading)
+                self.assertEqual(details["title"], expected)
+                self.assertTrue(details["collection"])
+
+    def test_complete_season_marker_is_not_a_collection(self) -> None:
+        # 「全集」是整季齐了，不是系列合集：这类剧集照常按单片（整季）入库。
+        details = parse_share_heading("📺 兰香如故 (2026) 全集")
+        self.assertEqual(details["title"], "兰香如故")
+        self.assertFalse(details["collection"])
+
+    def test_update_progress_without_the_episode_unit_is_cut(self) -> None:
+        for heading in ("📺 斗战天下 高码率  更新至26", "📺 剑来 更至10", "📺 逐玉 更新07"):
+            with self.subTest(heading=heading):
+                self.assertEqual(parse_share_heading(heading)["title"], heading.split()[1])
+
+    def test_quality_noise_words_are_cut(self) -> None:
+        for heading, expected in (
+            ("📺 破碎的愤怒 HDR10", "破碎的愤怒"),
+            ("📺 人偶之家 1080", "人偶之家"),
+            ("📺 沧元图 杜比视界", "沧元图"),
+        ):
+            with self.subTest(heading=heading):
+                self.assertEqual(parse_share_heading(heading)["title"], expected)
+
+    def test_unclosed_bracket_keeps_the_text_before_it(self) -> None:
+        for heading, expected in (
+            ("📺 星球大战（系列", "星球大战"),
+            ("📺 逐玉（1-15", "逐玉"),
+            ("📺 非常了得(2011-2014", "非常了得"),
+        ):
+            with self.subTest(heading=heading):
+                self.assertEqual(parse_share_heading(heading)["title"], expected)
+
+    def test_collection_marker_is_stripped_for_any_kind(self) -> None:
+        self.assertEqual(parse_share_heading("📺 生化危机（系列）")["title"], "生化危机")
+        self.assertEqual(parse_share_heading("🗂 老虎出更（系列）")["title"], "老虎出更")
+
+    def test_real_sequel_titles_keep_their_number(self) -> None:
+        for heading in ("🎥 疾速追杀2", "🎥 美国队长4", "🎥 惊声尖叫7"):
+            with self.subTest(heading=heading):
+                self.assertEqual(parse_share_heading(heading)["title"], heading.split()[1])
+
+    def test_strip_search_noise_only_for_episodic_or_large_numbers(self) -> None:
+        self.assertEqual(strip_search_noise("凡人修仙传172", episodic=True), "凡人修仙传")
+        self.assertEqual(strip_search_noise("仙逆 EP101", episodic=True), "仙逆")
+        self.assertEqual(strip_search_noise("破碎的愤怒 HDR10"), "破碎的愤怒")
+        # 续集数字不能被当作集数，否则会关联到系列第一部。
+        self.assertIsNone(strip_search_noise("疾速追杀2", episodic=False))
+        self.assertIsNone(strip_search_noise("美国队长4", episodic=False))
+
+    def test_strip_search_noise_returns_none_when_nothing_to_strip(self) -> None:
+        self.assertIsNone(strip_search_noise("飞驰人生2", episodic=False))
+        self.assertIsNone(strip_search_noise("", episodic=True))
 
 
 if __name__ == "__main__":

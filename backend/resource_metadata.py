@@ -5,6 +5,18 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit, urlencode
 
 RESOURCE_CLASSES = {'media': '影视', 'collection': '资源包', 'music': '音乐', 'person': '人物', 'other': '其他'}
 AVAILABILITY = {'available': '可用', 'pending': '待检查', 'invalid': '失效', 'unknown': '未知'}
+PERSON_NAME_STRIP = ' \t-–—|·()（）[]【】✨，,。、；;：:…！？!?'
+
+
+def clean_person_name(value):
+    """稳定人物名：取标题行、去图标与尾部标点，用于入库聚合与人物分组。
+
+    频道消息常见「👤 浅野心，🎂 生日：…」这类紧凑写法，姓名后紧跟的
+    中文逗号等标点必须去掉，否则「浅野心，」和「浅野心」会被拆成两个人物。
+    """
+    text = re.sub(r'^\s*[📺🎥🎬👤🗂🍿🎞️]+\s*', '', str(value or '').lstrip('\ufeff'))
+    first = text.splitlines()[0].strip() if text.strip() else ''
+    return first.strip(PERSON_NAME_STRIP)
 
 
 def json_object(value):

@@ -5,22 +5,25 @@ import math
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .importers import (
     extract_tmdb_ids, extract_tmdb_targets, is_search_title, normalize_title, parse_release_aliases,
-    parse_release_title, parse_title_year, split_joined_title,
+    parse_release_title, parse_title_year, split_joined_title, strip_search_noise,
     SEASON_EPISODE_RE, SEASON_RE,
 )
 from .recognition import Candidate as RecognitionCandidate, Recognizer as ReusableRecognizer, parse as parse_recognition
 from .imdb import ImdbClient, ImdbError, IMDB_ID_RE, normalize_imdb_title
 from .repository import (
+    connect,
+    extract_tmdb_seasons,
     get_media,
     link_tmdb,
     pending_media_ids,
@@ -749,6 +752,16 @@ class TmdbClient:
                     if local_type in {"movie", "tv"}:
                         run_search(local_type, alternative, use_year=bool(term.year), derived=True)
                     run_search("multi", alternative, derived=True)
+            # 频道常把集数/画质拼在片名后面（「凡人修仙传172」「破碎的愤怒 HDR10」）：
+            # 精确检索落空后再用基础片名试一次，避免整条资源因为一个尾巴搜不到而失配。
+            for term in context.terms[:2]:
+                stripped = strip_search_noise(term.title, episodic=context.episodic or local_type == "tv")
+                if not stripped:
+                    continue
+                alternative = SearchTerm(stripped, term.year)
+                if local_type in {"movie", "tv"}:
+                    run_search(local_type, alternative, use_year=bool(term.year), derived=True)
+                run_search("multi", alternative, derived=True)
 
         def enrich_titles() -> None:
             nonlocal verification_incomplete
@@ -1109,27 +1122,6 @@ def score_candidate(
     return round(max(0.0, min(score, 0.99)), 4)
 
 
-def has_season_episode_evidence(item: dict[str, Any]) -> bool:
-    """Whether any source of this work identified a season or an episode."""
-    for source in item.get("sources") or []:
-        if source.get("season") is not None or source.get("season_end") is not None or source.get("episode") is not None:
-            return True
-        metadata = source.get("metadata_json")
-        if isinstance(metadata, str) and metadata:
-            try:
-                metadata = json.loads(metadata)
-            except json.JSONDecodeError:
-                metadata = {}
-        if isinstance(metadata, dict) and (metadata.get("episode_range") or metadata.get("latest_episode")):
-            return True
-    return False
-
-
-def needs_episode_review(item: dict[str, Any], candidate: dict[str, Any]) -> bool:
-    """TV 作品匹配到 TMDB 却没有识别到任何季/集时，先入库但停在待确认。"""
-    return candidate.get("media_type") == "tv" and not has_season_episode_evidence(item)
-
-
 def should_auto_link(candidates: list[dict[str, Any]]) -> bool:
     candidates = matching_candidates(candidates)
     if not candidates:
@@ -1184,6 +1176,37 @@ def normalize_details(payload: dict[str, Any], media_type: str) -> dict[str, Any
     }
 
 
+def ensure_tmdb_seasons(
+    item: dict[str, Any], db_path: str | Path | None = None, client: "TmdbClient | None" = None,
+) -> list[dict[str, int]] | None:
+    """返回 TMDB 季集基准；已匹配剧集缺失缓存时抓取一次并存库（查看详情时懒回填）。"""
+    if item.get("tmdb_status") != "matched" or item.get("media_type") != "tv" or not item.get("tmdb_id"):
+        return None
+    raw = item.get("seasons_json")
+    if raw:
+        try:
+            seasons = json.loads(raw)
+        except json.JSONDecodeError:
+            seasons = None
+        if isinstance(seasons, list) and seasons:
+            return seasons
+    tmdb = client or TmdbClient()
+    if not tmdb.configured:
+        return None
+    try:
+        details = tmdb.details("tv", int(item["tmdb_id"]))
+    except TmdbError:
+        return None
+    seasons = extract_tmdb_seasons(details)
+    if seasons:
+        with connect(db_path) as connection:
+            connection.execute(
+                "UPDATE media_items SET seasons_json = ? WHERE id = ?",
+                (json.dumps(seasons, ensure_ascii=False), item["id"]),
+            )
+    return seasons
+
+
 def search_media(
     media_id: int,
     *,
@@ -1227,10 +1250,8 @@ def search_media(
         return {"status": "not_found", "linked": False, "candidates": [], "removed_sources": removed_sources}
 
     top = candidates[0]
+    # 没有季集线索的剧集资源按整季处理（来源补记 S01），正常自动关联。
     should_link = auto_link and should_auto_link(candidates)
-    if should_link and needs_episode_review(item, top):
-        # 资源已正常入库，但季集没有识别出来，无法确认覆盖范围：保存候选等待确认。
-        should_link = False
 
     if should_link:
         details = (normalize_details(top["payload"], top["media_type"])
@@ -1260,22 +1281,47 @@ def bulk_match(
     *,
     db_path: str | Path | None = None,
     client: TmdbClient | None = None,
+    workers: int = 1,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    series_only: bool = False,
 ) -> dict[str, Any]:
+    """Search TMDB for every media that is not matched yet.
+
+    ``workers`` > 1 runs the searches concurrently: each search issues a dozen
+    requests, so a serial pass spends most of its wall time waiting on round
+    trips. SQLite writes stay safe because each call opens its own connection
+    with a 30s busy timeout.
+    """
     tmdb = client or TmdbClient()
     if not tmdb.configured:
         raise TmdbError("TMDB 未配置。请先设置本机 API 凭据。")
 
     results = {"processed": 0, "matched": 0, "review": 0, "not_found": 0, "errors": 0, "removed": 0, "removed_sources": 0}
-    for media_id in pending_media_ids(limit, db_path):
+    media_ids = pending_media_ids(limit, db_path, series_only=series_only)
+
+    def run(media_id: int) -> str:
         try:
             outcome = search_media(media_id, auto_link=True, db_path=db_path, client=tmdb)
-            results["processed"] += 1
-            results["removed_sources"] += outcome.get("removed_sources", 0)
-            status = outcome["status"]
-            if status in results:
-                results[status] += 1
+            results_removed = outcome.get("removed_sources", 0)
+            return outcome["status"], results_removed
         except Exception:
-            results["processed"] += 1
-            results["errors"] += 1
-        time.sleep(0.04)
+            return "errors", 0
+
+    def record(status: str, removed_sources: int) -> None:
+        results["processed"] += 1
+        results["removed_sources"] += removed_sources
+        if status in results:
+            results[status] += 1
+        if progress and results["processed"] % 25 == 0:
+            progress(results)
+
+    if workers <= 1:
+        for media_id in media_ids:
+            record(*run(media_id))
+            time.sleep(0.04)
+        return results
+
+    with ThreadPoolExecutor(max_workers=min(max(workers, 2), 8)) as pool:
+        for status, removed_sources in pool.map(run, media_ids):
+            record(status, removed_sources)
     return results

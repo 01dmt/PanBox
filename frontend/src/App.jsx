@@ -7,6 +7,8 @@ import {
   getResources,
   getResourceFilters,
   getResourceDetail,
+  getSeries,
+  getSeriesDetail,
   updateResource,
   checkResource,
   getStats,
@@ -17,7 +19,7 @@ import {
   unlinkTmdb,
   updateMedia,
 } from "./api";
-import Sidebar from "./components/Sidebar";
+import ShellHeader from "./components/ShellHeader";
 import Topbar from "./components/Topbar";
 import StatsBar from "./components/StatsBar";
 import Dashboard from "./components/Dashboard";
@@ -28,18 +30,21 @@ import ImportView from "./components/ImportView";
 import SettingsView from "./components/SettingsView";
 import MobileNav from "./components/MobileNav";
 import ShareAuditStatus from "./components/ShareAuditStatus";
-import LibraryHero from "./components/LibraryHero";
-import CinematicFilters from "./components/CinematicFilters";
-import CinematicPosterGrid from "./components/CinematicPosterGrid";
-import ResourceLibrary, { ResourceDetail } from "./components/ResourceLibrary";
+import Re0HeroCarousel from "./components/Re0HeroCarousel";
+import Re0CatalogBrowser from "./components/Re0CatalogBrowser";
+import Re0PosterGrid from "./components/Re0PosterGrid";
+import Re0MovieDetail from "./components/Re0MovieDetail";
+import ResourceLibrary, { PersonResources, ResourceDetail } from "./components/ResourceLibrary";
+import SeriesBrowser from "./components/SeriesBrowser";
 import ResourceFilterToolbar from "./components/ResourceFilterToolbar";
 
 
-const DATA_VIEWS = new Set(["library", "resources", "pending", "duplicates"]);
+const DATA_VIEWS = new Set(["library", "movies", "tv", "resources", "pending", "duplicates"]);
 
 const DEFAULT_FILTERS = {
   status: "all",
-  type: "all",
+  type: "movie",
+  category: "all",
   resource_kind: "all",
   source: "all",
   availability: "available",
@@ -51,7 +56,7 @@ const DEFAULT_FILTERS = {
   hdr: "all",
   sort: "updated_desc",
   page: 1,
-  pageSize: 30,
+  pageSize: 36,
 };
 
 const DEFAULT_RESOURCE_FILTERS = {
@@ -72,7 +77,14 @@ const DEFAULT_RESOURCE_FILTERS = {
 
 
 export default function App() {
-  const [view, setView] = useState("library");
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem("panbox-theme");
+      if (saved === "light" || saved === "dark") return saved;
+    } catch {}
+    return "dark";
+  });
+  const [view, setView] = useState("movies");
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [resourceFilters, setResourceFilters] = useState(DEFAULT_RESOURCE_FILTERS);
   const [search, setSearch] = useState("");
@@ -84,9 +96,24 @@ export default function App() {
   const [pageData, setPageData] = useState({ items: [], total: 0, page: 1, pages: 1 });
   const [resourcePageData, setResourcePageData] = useState({ items: [], total: 0, page: 1, pages: 1, summary: {} });
   const [selectedId, setSelectedId] = useState(null);
+  const [selectedMediaDetailId, setSelectedMediaDetailId] = useState(null);
   const [selectedItem, setSelectedItem] = useState(null);
   const [selectedResourceId, setSelectedResourceId] = useState(null);
+  const [selectedPersonId, setSelectedPersonId] = useState(null);
   const [selectedResource, setSelectedResource] = useState(null);
+  const [resourceLayoutMode, setResourceLayoutMode] = useState(() => {
+    try {
+      return localStorage.getItem("panbox-resource-layout-mode") || "table";
+    } catch {
+      return "table";
+    }
+  });
+  const [seriesItems, setSeriesItems] = useState([]);
+  const [seriesQuery, setSeriesQuery] = useState("");
+  const [selectedSeriesId, setSelectedSeriesId] = useState(null);
+  const [seriesDetail, setSeriesDetail] = useState(null);
+  const [seriesLoading, setSeriesLoading] = useState(false);
+  const [seriesDetailLoading, setSeriesDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [resourceDetailLoading, setResourceDetailLoading] = useState(false);
@@ -102,12 +129,20 @@ export default function App() {
   const lastDataViewRef = useRef("library");
 
   const effectiveParams = useMemo(() => {
-    const status = view === "pending" && filters.status === "all" ? "pending" : filters.status;
+    const isCatalog = ["library", "movies", "tv"].includes(view);
+    const status = view === "pending" && filters.status === "all" ? "pending"
+      : isCatalog && filters.status === "all" ? "matched"
+      : filters.status;
+    const type = view === "movies" ? "movie"
+      : view === "tv" ? "tv"
+      : filters.type;
+
     return {
       q: deferredSearch,
       status,
-      type: filters.type,
-      resource_kind: view === "library" ? "media" : view === "resources" ? "all" : "all",
+      type,
+      category: view === "tv" ? (filters.category || "all") : "all",
+      resource_kind: isCatalog ? "media" : view === "resources" ? "all" : "all",
       source: filters.source,
       availability: filters.availability,
       year: filters.year,
@@ -176,6 +211,65 @@ export default function App() {
     aggregate: resourceFilters.group === "person" ? "person" : "",
   }), [deferredSearch, resourceFilters]);
 
+  const activePerson = useMemo(
+    () => (selectedPersonId ? resourcePageData.items.find((item) => item.id === selectedPersonId) ?? null : null),
+    [resourcePageData, selectedPersonId],
+  );
+
+  useEffect(() => {
+    // 筛选、搜索或翻页变化时退出人物详情，回到人物列表。
+    setSelectedPersonId(null);
+  }, [resourceParams]);
+
+  const loadSeries = useCallback(async () => {
+    if (view !== "series") return;
+    setSeriesLoading(true);
+    try {
+      const result = await getSeries();
+      const items = result.items || [];
+      setSeriesItems(items);
+      setSelectedSeriesId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? null));
+      setError("");
+    } catch (nextError) {
+      setError(nextError.message);
+    } finally {
+      setSeriesLoading(false);
+    }
+  }, [view]);
+
+  useEffect(() => {
+    loadSeries();
+  }, [loadSeries]);
+
+  useEffect(() => {
+    // 系列详情按选中项单独加载；切视图时清空，避免旧系列残留在右侧面板。
+    if (view !== "series" || !selectedSeriesId) {
+      setSeriesDetail(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setSeriesDetailLoading(true);
+    getSeriesDetail(selectedSeriesId)
+      .then((detail) => {
+        if (!cancelled) setSeriesDetail(detail);
+      })
+      .catch((nextError) => {
+        if (!cancelled) setError(nextError.message);
+      })
+      .finally(() => {
+        if (!cancelled) setSeriesDetailLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, selectedSeriesId]);
+
+  const visibleSeries = useMemo(() => {
+    const needle = seriesQuery.trim().toLowerCase();
+    if (!needle) return seriesItems;
+    return seriesItems.filter((item) => String(item.title || "").toLowerCase().includes(needle));
+  }, [seriesItems, seriesQuery]);
+
   const loadResources = useCallback(async () => {
     if (view !== "resources") return;
     const requestId = ++mediaRequestRef.current;
@@ -205,6 +299,17 @@ export default function App() {
       if (requestId === mediaRequestRef.current) setLoading(false);
     }
   }, [resourceParams, view]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    try {
+      localStorage.setItem("panbox-theme", theme);
+    } catch {}
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  }, []);
 
   useEffect(() => {
     loadSummary().catch((nextError) => setError(nextError.message));
@@ -264,7 +369,11 @@ export default function App() {
         event.preventDefault();
         searchRef.current?.focus();
       }
-      if (event.key === "Escape") setMobileInspectorOpen(false);
+      if (event.key === "Escape") {
+        setMobileInspectorOpen(false);
+        setSelectedMediaDetailId(null);
+        setSelectedResourceId(null);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -272,14 +381,28 @@ export default function App() {
 
   const changeView = useCallback((nextView) => {
     setView(nextView);
+    setSelectedMediaDetailId(null);
     setManualImportOpen(false);
+    const isCatalog = ["library", "movies", "tv"].includes(nextView);
     if (DATA_VIEWS.has(nextView) && nextView !== lastDataViewRef.current) {
       lastDataViewRef.current = nextView;
-      setFilters((current) => ({ ...DEFAULT_FILTERS, availability: nextView === "library" ? "available" : "all", pageSize: current.pageSize }));
+      const type = nextView === "movies" ? "movie" : nextView === "tv" ? "tv" : "all";
+      setFilters((current) => ({
+        ...DEFAULT_FILTERS,
+        type,
+        availability: isCatalog ? "available" : "all",
+        pageSize: current.pageSize,
+      }));
       setResourceFilters((current) => ({ ...DEFAULT_RESOURCE_FILTERS, pageSize: current.pageSize }));
       setSearch("");
     } else {
-      setFilters((current) => ({ ...current, page: 1 }));
+      if (nextView === "movies") {
+        setFilters((current) => ({ ...current, type: "movie", category: "all", page: 1 }));
+      } else if (nextView === "tv") {
+        setFilters((current) => ({ ...current, type: "tv", category: "all", page: 1 }));
+      } else {
+        setFilters((current) => ({ ...current, page: 1 }));
+      }
     }
     setMobileInspectorOpen(false);
     setNotice("");
@@ -487,18 +610,35 @@ export default function App() {
     setMobileInspectorOpen(true);
   }, []);
 
+  const openPerson = useCallback((personId) => {
+    setSelectedPersonId(personId);
+    // 进入人物详情时默认选中其第一个来源，右侧详情与所看人物保持一致。
+    const group = resourcePageData.items.find((item) => item.id === personId);
+    const first = group?.resources?.[0]?.id;
+    if (first) setSelectedResourceId(first);
+  }, [resourcePageData]);
+
   const openResourceMedia = useCallback((mediaId) => {
     if (!mediaId) return;
-    changeView("library");
-    setSelectedId(mediaId);
-    setMobileInspectorOpen(true);
+    changeView("movies");
+    setSelectedMediaDetailId(mediaId);
   }, [changeView]);
 
   return (
-    <div className="app-shell">
-      <Sidebar view={view} onChange={changeView} stats={stats} config={config} providerOptions={resourceFilterOptions?.providers} />
-      <div className={`app-main ${view === "resources" ? "app-main-resources" : ""}`}>
-        {view !== "library" && <Topbar
+    <div className="app-shell" data-theme={theme}>
+      <ShellHeader
+        view={view}
+        onChange={changeView}
+        stats={stats}
+        config={config}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        syncing={syncing}
+        onSync={handleSync}
+        onManualImport={() => setManualImportOpen(true)}
+      />
+      <div className={`app-main ${["resources", "series"].includes(view) ? "app-main-resources" : ["library", "movies", "tv"].includes(view) ? "app-main-library" : ""}`}>
+        {!["library", "movies", "tv", "series", "resources"].includes(view) && <Topbar
           view={view}
           search={search}
           onSearch={handleSearch}
@@ -514,7 +654,7 @@ export default function App() {
           onManualImport={() => setManualImportOpen(true)}
         />}
 
-        {view !== "dashboard" && view !== "library" && view !== "resources" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
+        {view !== "dashboard" && !["library", "movies", "tv", "series"].includes(view) && view !== "resources" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
         {error ? (
           <div className="message-banner error" role="alert">
             {error}
@@ -530,18 +670,108 @@ export default function App() {
 
         {view === "dashboard" ? <Dashboard stats={stats} onPending={() => changeView("pending")} /> : null}
 
-        {view === "library" ? (
-          <main className="cinematic-library">
-            <LibraryHero item={pageData.items.find((item) => item.backdrop_path) || pageData.items[0]} onOpen={(id) => { selectItem(id); setMobileInspectorOpen(true); }} />
-            <CinematicFilters filters={filters} options={filterOptions} total={pageData.total} search={search} onChange={changeFilters} onSearch={handleSearch} onReset={clearFilters} onMore={() => changeFilters({})} />
-            <CinematicPosterGrid items={pageData.items} loading={loading} selectedId={selectedId} onSelect={(id) => { selectItem(id); setMobileInspectorOpen(true); }} page={pageData.page} pages={pageData.pages} total={pageData.total} pageSize={filters.pageSize} onPageChange={(page) => changeFilters({ page })} onPageSizeChange={(pageSize) => changeFilters({ pageSize })} onClearFilters={clearFilters} />
-            {mobileInspectorOpen && <div className="cinema-drawer-backdrop" onClick={() => setMobileInspectorOpen(false)} />}
-            <div className={`cinema-drawer ${mobileInspectorOpen ? "open" : ""}`}><Inspector readOnly item={selectedItem} sourceIds={pageData.items.find((item) => item.id === selectedId)?.matched_source_ids} loading={detailLoading} tmdbConfigured={Boolean(config?.tmdb_configured)} mobileOpen={mobileInspectorOpen} onClose={() => setMobileInspectorOpen(false)} onSearch={handleSearchCandidates} onLink={handleLink} onReject={handleReject} onUnlink={handleUnlink} onUpdate={handleUpdate} /></div>
-          </main>
+        {["library", "movies", "tv"].includes(view) ? (
+          selectedMediaDetailId ? (
+            <Re0MovieDetail
+              mediaId={selectedMediaDetailId}
+              onClose={() => setSelectedMediaDetailId(null)}
+              onLink={handleLink}
+              onUnlink={handleUnlink}
+              onSearchCandidates={handleSearchCandidates}
+              tmdbConfigured={Boolean(config?.tmdb_configured)}
+              onCheckResource={handleResourceCheck}
+              onResourceAction={handleResourceAction}
+            />
+          ) : (
+            <main className="cinematic-library">
+              <Re0HeroCarousel items={pageData.items} mode={view === "tv" ? "tv" : "movie"} onOpen={(id) => setSelectedMediaDetailId(id)} />
+              <Re0CatalogBrowser filters={filters} options={filterOptions} total={pageData.total} mode={view === "tv" ? "tv" : "movie"} search={search} onChange={changeFilters} onSearch={handleSearch} onReset={clearFilters} />
+              <Re0PosterGrid items={pageData.items} loading={loading} selectedId={selectedId} mode={view === "tv" ? "tv" : "movie"} onSelect={(id) => setSelectedMediaDetailId(id)} page={pageData.page} pages={pageData.pages} total={pageData.total} pageSize={filters.pageSize} onPageChange={(page) => changeFilters({ page })} onPageSizeChange={(pageSize) => changeFilters({ pageSize })} onClearFilters={clearFilters} />
+              {mobileInspectorOpen && <div className="cinema-drawer-backdrop" onClick={() => setMobileInspectorOpen(false)} />}
+              <div className={`cinema-drawer ${mobileInspectorOpen ? "open" : ""}`}><Inspector readOnly item={selectedItem} sourceIds={pageData.items.find((item) => item.id === selectedId)?.matched_source_ids} loading={detailLoading} tmdbConfigured={Boolean(config?.tmdb_configured)} mobileOpen={mobileInspectorOpen} onClose={() => setMobileInspectorOpen(false)} onSearch={handleSearchCandidates} onLink={handleLink} onReject={handleReject} onUnlink={handleUnlink} onUpdate={handleUpdate} /></div>
+            </main>
+          )
         ) : DATA_VIEWS.has(view) ? (
           <>
             {view !== "resources" ? <StatsBar stats={stats} activeView={view} providerOptions={resourceFilterOptions?.providers} /> : null}
-            {view === "resources" ? <><ResourceFilterToolbar filters={resourceFilters} options={resourceFilterOptions} loading={loading} total={resourcePageData.total} summary={resourcePageData.summary} onChange={changeResourceFilters} onReset={clearResourceFilters} /><div className="resource-library-layout" id="resource-category-panel" role="tabpanel" aria-labelledby={`resource-tab-${resourceFilters.group}`}><ResourceLibrary items={resourcePageData.items} loading={loading} grouped={resourcePageData.aggregated === "person"} selectedId={selectedResourceId} onSelect={selectResource} total={resourcePageData.total} page={resourcePageData.page} pages={resourcePageData.pages} onPageChange={(page) => changeResourceFilters({ page })} onAction={handleResourceAction} onCheck={handleResourceCheck} checkingId={checkingResourceId} summary={resourcePageData.summary} onClearFilters={clearResourceFilters} /><ResourceDetail item={selectedResource} loading={resourceDetailLoading} onClose={() => setSelectedResourceId(null)} onAction={(resourceId, action) => action === "select" ? selectResource(resourceId) : handleResourceAction(resourceId, action)} onCheck={handleResourceCheck} checking={checkingResourceId === selectedResourceId} onUpdate={handleResourceUpdate} onViewMedia={openResourceMedia} mobileOpen={mobileInspectorOpen} /></div></> : null}
+            {view === "resources" ? (
+              <>
+                <ResourceFilterToolbar
+                  filters={resourceFilters}
+                  options={resourceFilterOptions}
+                  loading={loading}
+                  total={resourcePageData.total}
+                  summary={resourcePageData.summary}
+                  search={search}
+                  onSearch={handleSearch}
+                  layoutMode={resourceLayoutMode}
+                  onLayoutModeChange={(mode) => {
+                    setResourceLayoutMode(mode);
+                    try {
+                      localStorage.setItem("panbox-resource-layout-mode", mode);
+                    } catch {}
+                  }}
+                  onChange={changeResourceFilters}
+                  onReset={clearResourceFilters}
+                />
+                <div
+                  className="resource-library-layout"
+                  id="resource-category-panel"
+                  role="tabpanel"
+                  aria-labelledby={`resource-tab-${resourceFilters.group}`}
+                >
+                  {activePerson ? (
+                    <PersonResources
+                      group={activePerson}
+                      onBack={() => setSelectedPersonId(null)}
+                      selectedId={selectedResourceId}
+                      onSelect={selectResource}
+                      onAction={handleResourceAction}
+                      onCheck={handleResourceCheck}
+                      checkingId={checkingResourceId}
+                    />
+                  ) : (
+                    <ResourceLibrary
+                      items={resourcePageData.items}
+                      loading={loading}
+                      grouped={resourcePageData.aggregated === "person"}
+                      selectedId={selectedResourceId}
+                      onSelect={selectResource}
+                      total={resourcePageData.total}
+                      page={resourcePageData.page}
+                      pages={resourcePageData.pages}
+                      pageSize={resourceFilters.pageSize}
+                      onPageChange={(page) => changeResourceFilters({ page })}
+                      onPageSizeChange={(pageSize) => changeResourceFilters({ pageSize })}
+                      onAction={handleResourceAction}
+                      onCheck={handleResourceCheck}
+                      checkingId={checkingResourceId}
+                      summary={resourcePageData.summary}
+                      onClearFilters={clearResourceFilters}
+                      onOpenPerson={openPerson}
+                    />
+                  )}
+                  <ResourceDetail
+                    item={selectedResource}
+                    loading={resourceDetailLoading}
+                    onClose={() => {
+                      setSelectedResourceId(null);
+                      setMobileInspectorOpen(false);
+                    }}
+                    onAction={(resourceId, action) =>
+                      action === "select"
+                        ? selectResource(resourceId)
+                        : handleResourceAction(resourceId, action)
+                    }
+                    onCheck={handleResourceCheck}
+                    checking={checkingResourceId === selectedResourceId}
+                    onUpdate={handleResourceUpdate}
+                    onViewMedia={openResourceMedia}
+                    open={Boolean(selectedResourceId && mobileInspectorOpen)}
+                  />
+                </div>
+              </>
+            ) : null}
             <div className={`workspace-grid ${view === "resources" ? "resource-workspace-hidden" : ""}`}>
               <main className={`library-panel ${view === "resources" ? "resource-library-hidden" : ""}`}>
                 <FilterToolbar
@@ -586,6 +816,20 @@ export default function App() {
               />
             </div>
           </>
+        ) : null}
+
+        {view === "series" ? (
+          <SeriesBrowser
+            items={visibleSeries}
+            loading={seriesLoading}
+            detail={seriesDetail}
+            detailLoading={seriesDetailLoading}
+            selectedId={selectedSeriesId}
+            onSelect={setSelectedSeriesId}
+            query={seriesQuery}
+            onQuery={setSeriesQuery}
+            onOpenMedia={openResourceMedia}
+          />
         ) : null}
 
         {view === "imports" ? (

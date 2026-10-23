@@ -83,6 +83,14 @@ export function getMediaDetail(mediaId) {
   return request(`/api/media/${mediaId}`);
 }
 
+export function getSeries(signal) {
+  return request("/api/series", { signal });
+}
+
+export function getSeriesDetail(seriesId, signal) {
+  return request(`/api/series/${seriesId}`, { signal });
+}
+
 export function getResources(params, signal) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {

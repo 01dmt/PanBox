@@ -195,6 +195,98 @@ class ResourceQueryTests(unittest.TestCase):
                 JOIN media_items m ON m.id=s.media_id WHERE m.title LIKE '%示例%' ORDER BY s.id""").fetchall()
         self.assertEqual([tuple(r) for r in rows], [('115:person', 'person', 'person'), ('115:series', 'series', 'collection')])
 
+    def test_person_entries_are_cleaned_and_merged_during_migration(self):
+        with connect(self.db) as db:
+            db.execute("INSERT INTO media_items (title, normalized_title, year, media_type, resource_kind, created_at, updated_at) VALUES ('浅野心，','浅野心',1994,'unknown','person','x','x')")
+            db.execute("INSERT INTO media_items (title, normalized_title, year, media_type, resource_kind, created_at, updated_at) VALUES ('浅野心','浅野心',NULL,'unknown','person','x','x')")
+            db.execute("INSERT INTO media_items (title, normalized_title, year, media_type, resource_kind, created_at, updated_at) VALUES ('另一个人,','另一个人',2001,'unknown','person','x','x')")
+            ids = [r["id"] for r in db.execute("SELECT id FROM media_items WHERE normalized_title IN ('浅野心','另一个人') ORDER BY id").fetchall()]
+            for key, media_id in zip(("115:legacy1", "115:legacy2"), ids):
+                db.execute("INSERT INTO source_records (media_id, source_type, provider, source_key, raw_label, raw_text, url, resource_class, parsed_year, created_at) VALUES (?, '115','115',?, 'x','x',?, 'person', 1994, 'x')",
+                           (media_id, key, f'https://115.com/s/{key}'))
+            db.execute("INSERT INTO ingestion_events (id, event_id, raw_text, media_ids_json, received_at) VALUES ('e1','ev1','t', ?, 'x')", (json.dumps(ids),))
+            # 模拟本次迁移之前的存量数据状态。
+            db.execute("DELETE FROM schema_migrations WHERE name='person_entries_aggregation_v1'")
+        init_db(self.db)
+        with connect(self.db) as db:
+            rows = db.execute("SELECT id, title, year FROM media_items WHERE resource_kind='person' ORDER BY id").fetchall()
+            srcs = db.execute("SELECT source_key, media_id, parsed_year FROM source_records WHERE source_key LIKE '115:legacy%' ORDER BY source_key").fetchall()
+            event = db.execute("SELECT media_ids_json FROM ingestion_events WHERE id='e1'").fetchone()
+        self.assertEqual({row["title"] for row in rows}, {"浅野心", "另一个人"})
+        self.assertTrue(all(row["year"] is None for row in rows))
+        self.assertTrue(all(src["parsed_year"] is None for src in srcs))
+        # 两条浅野心来源合并到同一条目，事件里的失效 id 重映射到保留条目。
+        merged_person = next(src["media_id"] for src in srcs if src["source_key"] == "115:legacy1")
+        self.assertEqual(next(src["media_id"] for src in srcs if src["source_key"] == "115:legacy2"), merged_person)
+        self.assertEqual(sorted(json.loads(event["media_ids_json"])), sorted({row["id"] for row in rows}))
+
+    def test_person_message_history_is_reattributed_during_migration(self):
+        person_source = ("👤 浅野心，🎂 生日：2002-06-11\n"
+                         "🔗 https://115.com/s/hist1\nhttps://115.com/s/hist2")
+        single_source = "👤 小野六花\n🔗 https://115.com/s/solo"
+        with connect(self.db) as db:
+            # 浅野心：旧解析把同一人物按年份拆成两条普通影视条目。
+            split = [db.execute(
+                "INSERT INTO media_items (title, normalized_title, year, media_type, resource_kind, tmdb_status, created_at, updated_at) VALUES ('浅野心','浅野心',2023,'movie','media','error','x','x')"
+            ).lastrowid, db.execute(
+                "INSERT INTO media_items (title, normalized_title, year, media_type, resource_kind, tmdb_status, created_at, updated_at) VALUES ('浅野心','浅野心',2024,'movie','media','error','x','x')"
+            ).lastrowid]
+            # 小野六花：全部来源恰好落在同一条普通条目上，迁移时应提升该条目。
+            solo = db.execute(
+                "INSERT INTO media_items (title, normalized_title, year, media_type, resource_kind, tmdb_status, created_at, updated_at) VALUES ('小野六花','小野六花',NULL,'movie','media','error','x','x')"
+            ).lastrowid
+            for media_id, key, year in ((split[0], "115:hist1", 2023), (split[1], "115:hist2", 2023), (solo, "115:solo", None)):
+                db.execute("INSERT INTO source_records (media_id, source_type, provider, source_key, raw_label, raw_text, url, resource_class, parsed_year, created_at) VALUES (?, '115','115',?, 'x','x',?, 'other', ?, 'x')",
+                           (media_id, key, f'https://115.com/s/{key.split(":")[-1]}', year))
+            db.execute("INSERT INTO ingestion_events (id, event_id, service, channel_username, message_url, raw_text, status, media_ids_json, received_at) VALUES ('ev-a','19682','telegram','Lsp115','https://t.me/Lsp115/19682',?,'imported',?,'x')",
+                       (person_source, json.dumps(split)))
+            db.execute("INSERT INTO ingestion_events (id, event_id, service, channel_username, message_url, raw_text, status, media_ids_json, received_at) VALUES ('ev-b','19680','telegram','Lsp115','https://t.me/Lsp115/19680',?,'imported',?,'x')",
+                       (single_source, json.dumps([solo])))
+            for key, media_id in (("115:hist1", split[0]), ("115:hist2", split[1])):
+                db.execute("INSERT INTO ingestion_links (ingestion_id, source_key, provider, source_type, url, status, media_id) VALUES ('ev-a',?,'115','115',?,'inserted',?)",
+                           (key, f'https://115.com/s/{key.split(":")[-1]}', media_id))
+            db.execute("INSERT INTO ingestion_links (ingestion_id, source_key, provider, source_type, url, status, media_id) VALUES ('ev-b','115:solo','115','115','https://115.com/s/solo','inserted',?)", (solo,))
+            # 模拟本次迁移之前的存量数据状态。
+            db.execute("DELETE FROM schema_migrations WHERE name='person_message_attribution_v1'")
+        init_db(self.db)
+        with connect(self.db) as db:
+            persons = db.execute("SELECT id, title, year, media_type FROM media_items WHERE resource_kind='person' ORDER BY id").fetchall()
+            srcs = db.execute("SELECT source_key, media_id, resource_class, parsed_year FROM source_records WHERE source_key IN ('115:hist1','115:hist2','115:solo') ORDER BY source_key").fetchall()
+            events = db.execute("SELECT id, media_ids_json FROM ingestion_events WHERE id IN ('ev-a','ev-b') ORDER BY id").fetchall()
+            leftovers = db.execute("SELECT COUNT(*) FROM media_items WHERE id IN (?,?,?)", (*split, solo)).fetchone()[0]
+        by_title = {row["title"]: row for row in persons}
+        self.assertEqual({title: (row["year"], row["media_type"]) for title, row in by_title.items()},
+                         {"浅野心": (None, "unknown"), "小野六花": (None, "unknown")})
+        self.assertEqual({src["source_key"]: (src["media_id"], src["resource_class"], src["parsed_year"]) for src in srcs},
+                         {"115:hist1": (by_title["浅野心"]["id"], "person", None),
+                          "115:hist2": (by_title["浅野心"]["id"], "person", None),
+                          "115:solo": (by_title["小野六花"]["id"], "person", None)})
+        # 单条普通条目被提升时保留原 id，不产生新条目。
+        self.assertEqual(by_title["小野六花"]["id"], solo)
+        self.assertEqual({row["id"]: json.loads(row["media_ids_json"]) for row in events},
+                         {"ev-a": [by_title["浅野心"]["id"]], "ev-b": [by_title["小野六花"]["id"]]})
+        self.assertEqual(leftovers, 1)  # 只有被提升的 小野六花 条目保留，两条分裂条目被清理
+
+    def test_person_tmdb_state_is_reset_during_migration(self):
+        with connect(self.db) as db:
+            person_id = db.execute(
+                "INSERT INTO media_items (title, normalized_title, year, media_type, resource_kind, tmdb_id, tmdb_media_type, tmdb_status, tmdb_title, poster_path, last_tmdb_error, match_confidence, created_at, updated_at) VALUES ('浅野心','浅野心',NULL,'unknown','person',455,'movie','error','浅野心','/p.jpg','boom',0.9,'x','x')"
+            ).lastrowid
+            db.execute("INSERT INTO tmdb_candidates (media_id, tmdb_id, media_type, title, score, payload_json, created_at) VALUES (?,455,'movie','浅野心',0.9,'{}','x')", (person_id,))
+            db.execute("INSERT INTO imdb_lookups (media_id, evidence_json, updated_at) VALUES (?,'{}','x')", (person_id,))
+            # 模拟本次迁移之前的存量数据状态。
+            db.execute("DELETE FROM schema_migrations WHERE name='person_tmdb_state_reset_v1'")
+        init_db(self.db)
+        with connect(self.db) as db:
+            row = db.execute(
+                "SELECT tmdb_status, tmdb_id, poster_path, last_tmdb_error, match_confidence FROM media_items WHERE id=?",
+                (person_id,),
+            ).fetchone()
+            candidates = db.execute("SELECT COUNT(*) FROM tmdb_candidates WHERE media_id=?", (person_id,)).fetchone()[0]
+            lookups = db.execute("SELECT COUNT(*) FROM imdb_lookups WHERE media_id=?", (person_id,)).fetchone()[0]
+        self.assertEqual(tuple(row), ("pending", None, None, None, None))
+        self.assertEqual((candidates, lookups), (0, 0))
+
     def test_source_kind_ignores_metadata_icons_and_missing_context(self):
         for metadata, expected in [
             ({'context': '📺 红女王\n🗂 分类：剧集\n👤 投稿人'}, 'media'),
