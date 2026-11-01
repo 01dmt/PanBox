@@ -10,7 +10,7 @@ from pathlib import Path
 
 from backend.importers import ParsedSource
 from backend.ingestion import _auto_match_media, _lsp115_person_context, get_event, receive, reprocess_ignored
-from backend.repository import _format_ingestion_episode_labels, get_media, import_content, list_ingestion_records, list_media, pending_media_ids
+from backend.repository import _format_ingestion_episode_labels, get_media, get_stats, import_content, list_ingestion_records, list_media, pending_media_ids
 from backend.schema import connect
 from backend.share115 import Share115Error
 from backend.tmdb import search_media
@@ -92,6 +92,38 @@ class IngestionTests(unittest.TestCase):
         # 调用参数必须与 search_media 签名兼容：参数漂移曾被 except 静默吞掉，
         # 导致新入库作品永远停在 pending 且不显示海报。
         inspect.signature(search_media).bind(0, **search.call_args.kwargs)
+
+    def test_new_bare_episode_uses_matched_base_year(self) -> None:
+        import_content("📺 凡人修仙传 (2020)\nhttps://115.com/s/fanren-base", "test.txt", db_path=self.db_path)
+        with connect(self.db_path) as db:
+            base_id = db.execute("SELECT id FROM media_items WHERE title='凡人修仙传'").fetchone()[0]
+            db.execute("UPDATE media_items SET media_type='tv', tmdb_status='matched', tmdb_id=106449 WHERE id=?", (base_id,))
+
+        with patch("backend.ingestion.TmdbClient") as client_type:
+            client_type.return_value.configured = False
+            result = receive(
+                {
+                    "event_id": "fanren-173",
+                    "source": {"service": "test"},
+                    "message": {"text": "🎬 凡人修仙传173 (2020-07-25) https://115.com/s/fanren-173"},
+                },
+                self.db_path,
+            )
+            event = self.wait_for_status(result["id"])
+
+        self.assertEqual(event["status"], "imported")
+        with connect(self.db_path) as db:
+            target = db.execute(
+                "SELECT id, title, year, media_type, tmdb_status FROM media_items "
+                "WHERE title='凡人修仙传' AND tmdb_status='pending' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            source = db.execute(
+                "SELECT season, episode FROM source_records WHERE media_id=?", (target["id"],)
+            ).fetchone()
+        self.assertEqual(target["title"], "凡人修仙传")
+        self.assertEqual(target["year"], 2020)
+        self.assertEqual(target["media_type"], "tv")
+        self.assertEqual((source["season"], source["episode"]), (1, 173))
 
     def test_successful_retry_clears_stale_ingestion_error(self) -> None:
         with patch("backend.ingestion.expand_resource_pages", return_value="电影 (2024) https://115.com/s/retry"):
@@ -315,6 +347,42 @@ class IngestionTests(unittest.TestCase):
         records = list_ingestion_records(db_path=self.db_path)["items"][0]
         self.assertEqual(records["media_titles"], ["陈百强"])
 
+    def test_guangya_channel_message_keeps_its_film_title(self) -> None:
+        """光鸭频道的 `👤 分享：` 字段不能把整条消息并成一条人物记录。"""
+        message = (
+            "🎬 斗破苍穹 (2017) 已更新\n"
+            "🖥 画质：2160p\n"
+            "📼 集数：第217集\n"
+            "👤 分享：热心网友\n\n"
+            "🔎 TMDB：79481 https://www.themoviedb.org/tv/79481\n"
+            "按钮链接：\n"
+            "🔗 光鸭云盘：查看资源 https://www.guangyapan.com/s/1963686782622208053_ad4bBsAqF4UM3yDM\n"
+        )
+        with patch("backend.ingestion.ShareGuangyaClient.probe_share"), patch("backend.ingestion.TmdbClient") as client_type:
+            client_type.return_value.configured = False
+            result = receive(
+                {
+                    "event_id": "guangya-channel-message",
+                    "source": {
+                        "service": "telegram",
+                        "channel_name": "光鸭云盘影视热更频道",
+                        "channel_username": "regengguangya",
+                        "message_url": "https://t.me/regengguangya/6266",
+                    },
+                    "message": {"text": message},
+                },
+                self.db_path,
+            )
+            event = self.wait_for_status(result["id"])
+
+        self.assertEqual(event["status"], "imported")
+        with connect(self.db_path) as db:
+            media = db.execute("SELECT title, resource_kind, media_type FROM media_items").fetchall()
+            source = db.execute("SELECT season, episode FROM source_records").fetchone()
+        self.assertEqual([(row["title"], row["resource_kind"]) for row in media], [("斗破苍穹", "media")])
+        self.assertEqual(media[0]["media_type"], "tv")
+        self.assertEqual((source["season"], source["episode"]), (1, 217))
+
     def test_lsp115_person_heading_owns_expanded_resources(self) -> None:
         expanded_source = "ed2k://|file|本田瞳合集.zip|40|DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD|/"
         message = (
@@ -351,6 +419,35 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(source["resource_class"], "person")
         self.assertIn("代表作一 / 代表作二", source["metadata_json"])
         self.assertIsNone(_lsp115_person_context(message, {"channel_username": "other-channel"}))
+
+    def test_person_profile_promotes_duplicate_media_source(self) -> None:
+        source = {
+            "service": "telegram",
+            "channel_name": "115网盘资源分享频道",
+            "channel_username": "Lsp115",
+        }
+        first = receive(
+            {"event_id": "profile-media", "source": source, "message": {"text": "🎬 加藤莉娜 合集 电影\nhttps://115.com/s/profile"}},
+            self.db_path,
+            auto_match=False,
+        )
+        first_event = self.wait_for_status(first["id"])
+        self.assertEqual(first_event["status"], "imported")
+        second = receive(
+            {"event_id": "profile-person", "source": source, "message": {"text": "👤 加藤リナ\n🎂 生日：1990-06-04\nhttps://115.com/s/profile"}},
+            self.db_path,
+            auto_match=False,
+        )
+        second_event = self.wait_for_status(second["id"])
+        self.assertTrue(second["accepted"])
+        self.assertEqual(second_event["status"], "duplicate")
+        with connect(self.db_path) as db:
+            rows = db.execute("SELECT id, title, resource_kind, media_type FROM media_items").fetchall()
+            source_row = db.execute("SELECT media_id, resource_class FROM source_records").fetchone()
+            links = db.execute("SELECT DISTINCT media_id FROM ingestion_links").fetchall()
+        self.assertEqual([(row["title"], row["resource_kind"], row["media_type"]) for row in rows], [("加藤リナ", "person", "unknown")])
+        self.assertEqual((source_row["media_id"], source_row["resource_class"]), (rows[0]["id"], "person"))
+        self.assertEqual([row["media_id"] for row in links], [rows[0]["id"]])
 
     def test_lsp115_person_messages_aggregate_under_clean_name(self) -> None:
         source = {"service": "telegram", "channel_name": "115网盘资源分享频道", "channel_username": "Lsp115"}
@@ -437,6 +534,15 @@ class AutoMatchTests(unittest.TestCase):
         with connect(self.db_path) as db:
             return int(db.execute("SELECT id FROM media_items WHERE resource_kind='person'").fetchone()[0])
 
+    def test_person_resources_are_not_in_pending_queue(self) -> None:
+        person_id = self.person_media_id()
+        pending = list_media(status="pending", page_size=100, db_path=self.db_path)
+        unsearched = list_media(status="unsearched", page_size=100, db_path=self.db_path)
+        stats = get_stats(self.db_path)["media"]
+        self.assertNotIn(person_id, [item["id"] for item in pending["items"]])
+        self.assertNotIn(person_id, [item["id"] for item in unsearched["items"]])
+        self.assertEqual((pending["total"], unsearched["total"], stats["total"], stats["pending"], stats["unsearched"]), (1, 1, 1, 1, 1))
+
     def test_person_media_is_skipped_by_auto_match(self) -> None:
         person_id = self.person_media_id()
         with patch("backend.ingestion.TmdbClient") as client_cls, \
@@ -447,6 +553,28 @@ class AutoMatchTests(unittest.TestCase):
         self.assertEqual(result, {person_id: "skipped_person"})
         with connect(self.db_path) as db:
             row = db.execute("SELECT tmdb_status FROM media_items WHERE id=?", (person_id,)).fetchone()
+        self.assertEqual(row["tmdb_status"], "pending")
+
+    def test_metadata_pack_is_skipped_by_auto_match(self) -> None:
+        content = "\n".join([
+            "📺 毒液（系列） (2020)",
+            "ed2k://|file|fanart.jpg|100|" + "A" * 32 + "|/",
+            "ed2k://|file|poster.jpg|101|" + "B" * 32 + "|/",
+            "ed2k://|file|毒液（系列）.nfo|102|" + "C" * 32 + "|/",
+        ])
+        import_content(content, "metadata.txt", db_path=self.db_path)
+        with connect(self.db_path) as db:
+            media_id = int(db.execute(
+                "SELECT id FROM media_items WHERE is_metadata = 1"
+            ).fetchone()["id"])
+        with patch("backend.ingestion.TmdbClient") as client_cls, \
+                patch("backend.ingestion.search_media") as matcher:
+            client_cls.return_value.configured = True
+            result = _auto_match_media({media_id}, self.db_path)
+        matcher.assert_not_called()
+        self.assertEqual(result, {media_id: "skipped_metadata"})
+        with connect(self.db_path) as db:
+            row = db.execute("SELECT tmdb_status FROM media_items WHERE id=?", (media_id,)).fetchone()
         self.assertEqual(row["tmdb_status"], "pending")
 
     def test_pending_media_ids_excludes_person_entries(self) -> None:

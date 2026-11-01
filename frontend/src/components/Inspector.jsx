@@ -5,6 +5,7 @@ import {
   Clipboard,
   ExternalLink,
   FileVideo2,
+  Film,
   Link2,
   LoaderCircle,
   Pencil,
@@ -18,6 +19,8 @@ import {
   displayResourceKind,
   displayStatus,
   formatBytes,
+  formatDate,
+  formatDateTime,
   maskedSource,
   posterUrl,
 } from "../lib/format";
@@ -31,6 +34,27 @@ function parseJson(value, fallback = []) {
   } catch {
     return fallback;
   }
+}
+
+
+function importMethodLabel(source) {
+  const name = source.import_source_name || "";
+  if (name.startsWith("webhook:")) return "Webhook 实时入库";
+  if (name.startsWith("telegram:")) return "Telegram 导出导入";
+  if (name === "browser-import.txt") return "网页手动导入";
+  if (source.import_source_path) return "本地文件导入";
+  return "批量导入";
+}
+
+
+function messagePreview(text) {
+  return (text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .join(" · ")
+    .slice(0, 140);
 }
 
 
@@ -73,6 +97,11 @@ function SourceRow({ source, readOnly = false, onHover }) {
           {source.season != null ? ` · ${seasonLabel}${source.episode != null ? episodeLabel : " · 整季"}` : ""}
         </span>
         <small>{isCloudShare ? maskedSource(source.url) : source.ed2k_hash}</small>
+        <small className="source-origin" title={source.import_source_name || undefined}>
+          {importMethodLabel(source)}
+          {source.import_created_at ? ` · ${formatDateTime(source.import_created_at)}` : ""}
+          {source.import_id ? ` · 批次 #${source.import_id}` : ""}
+        </small>
         {searchNames.length ? <small className="source-match-hint">内容：{searchNames.slice(0, 2).join(" · ")}</small> : null}
         {snapshot?.status === "unavailable" ? <small className="source-unavailable">分享内容不可访问</small> : null}
       </div>
@@ -290,7 +319,7 @@ function Candidate({ candidate, onLink, onReject, disabled }) {
 const IMDB_STATUSES = {
   missing_year: "缺少本地年份",
   conflicting_years: "来源年份冲突",
-  collection: "系列或合集待确认",
+  collection: "合集待确认",
   no_exact_match: "没有片名、年份完全一致的 IMDb 结果",
   ambiguous_imdb: "IMDb 存在多个同名同年条目",
   no_tmdb_mapping: "IMDb 已定位，TMDB 没有对应关联",
@@ -330,6 +359,71 @@ function ImdbEvidence({ lookup }) {
           </a>
         </div>
       ))}
+    </section>
+  );
+}
+
+
+function padEpisode(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number).padStart(2, "0") : String(value);
+}
+
+
+function extractedEpisodeLabels(sources) {
+  const labels = [];
+  const seasonPacks = new Set();
+  for (const source of sources || []) {
+    if (source.episode == null) {
+      if (source.season != null) seasonPacks.add(`S${padEpisode(source.season)} 整季`);
+      continue;
+    }
+    const metadata = parseJson(source.metadata_json, {});
+    const range = Array.isArray(metadata?.episode_range) && metadata.episode_range.length === 2
+      ? metadata.episode_range
+      : null;
+    const start = Number(source.episode);
+    const end = range ? Math.max(Number(range[1]), start) : start;
+    const season = source.season != null ? Number(source.season) : 1;
+    labels.push(`S${padEpisode(season)}E${padEpisode(start)}${end > start ? `-E${padEpisode(end)}` : ""}`);
+  }
+  const unique = [...new Set(labels)].sort();
+  if (unique.length) {
+    return `${unique.slice(0, 6).join("、")}${unique.length > 6 ? ` 等 ${unique.length} 个` : ""}`;
+  }
+  if (seasonPacks.size) return [...seasonPacks].sort().join("、");
+  return "未提取";
+}
+
+
+function ParsedInfo({ item }) {
+  const metadata = parseJson(item?.resource_metadata_json, {});
+  const heading = String(metadata?.context || "").split("\n")[0].trim();
+  const sourceNames = [...new Set((item?.sources || []).map((source) => source.raw_label || source.filename).filter(Boolean))].slice(0, 3);
+  const year = item?.year || item?.release_date?.slice(0, 4) || "未提取";
+  return (
+    <section className="inspector-section parsed-info" aria-label="当前提取信息">
+      <div className="section-title">
+        <h3>当前提取信息</h3>
+        <span>入库解析结果</span>
+      </div>
+      <dl className="parsed-fields">
+        <div><dt>提取标题</dt><dd>{item?.title || "未提取"}</dd></div>
+        <div><dt>年份</dt><dd>{year}</dd></div>
+        <div><dt>类型</dt><dd>{displayMediaType(item?.media_type)}</dd></div>
+        <div><dt>季 / 集</dt><dd>{extractedEpisodeLabels(item?.sources)}</dd></div>
+        {heading ? <div><dt>频道标题</dt><dd>{heading}</dd></div> : null}
+        {sourceNames.length ? (
+          <div>
+            <dt>资源名</dt>
+            <dd>
+              {sourceNames.join("；")}
+              {(item?.sources?.length || 0) > sourceNames.length ? ` 等 ${item.sources.length} 条` : ""}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+      <p className="parsed-hint">关联后标题以 TMDB 为准；这里展示的是当前用于判断的解析结果。</p>
     </section>
   );
 }
@@ -406,7 +500,7 @@ export default function Inspector({
       {item ? (
         <div className="inspector-scroll" ref={scrollRef}>
           <section className="media-summary">
-            <img src={posterUrl(item.poster_path)} alt="" />
+            {item.poster_path ? <img src={posterUrl(item.poster_path)} alt="" /> : <div className="media-summary-poster placeholder" aria-hidden="true"><Film size={22} /><span>暂无海报</span></div>}
             <div>
               <span className={`status-chip status-${item.tmdb_status}`}>{displayStatus(item.tmdb_status)}</span>
               <h2>{item.tmdb_title || item.title}</h2>
@@ -423,6 +517,65 @@ export default function Inspector({
               {genres.length ? <div className="genre-line">{genres.slice(0, 4).map((genre) => <span key={genre.id}>{genre.name}</span>)}</div> : null}
             </div>
           </section>
+
+          <ParsedInfo item={item} />
+
+          {/* 待匹配工作流：候选是主操作，放在摘要之后，避免用户滚动整个详情才能关联。 */}
+          {!readOnly && <section className="inspector-section candidate-section priority">
+            <div className="section-title">
+              <h3>TMDB 匹配候选 {item.candidates?.length ? <span>{item.candidates.length}</span> : null}</h3>
+              <div className="candidate-actions">
+                {item.tmdb_status !== "matched" ? <button type="button" className="icon-only" onClick={() => setTmdbSearchFor((current) => current === item.id ? null : item.id)} disabled={!tmdbConfigured || loading} title="手动搜索 TMDB" aria-label="手动搜索 TMDB" aria-expanded={tmdbSearchFor === item.id} aria-controls="manual-tmdb-search"><Search size={16} /></button> : null}
+                <button type="button" className="icon-only" onClick={onSearch} disabled={!tmdbConfigured || loading} title="重新刮削候选" aria-label="重新刮削候选">
+                  <RefreshCw size={16} className={loading ? "spin" : ""} />
+                </button>
+              </div>
+            </div>
+
+            {item.tmdb_status !== "matched" && tmdbSearchFor === item.id ? <div id="manual-tmdb-search"><TmdbSearch key={item.id} title={item.title} disabled={!tmdbConfigured || loading} onLink={onLink} /></div> : null}
+
+            {item.tmdb_status === "matched" ? (
+              <div className="matched-panel">
+                <Check size={18} />
+                <div><strong>已关联 TMDB #{item.tmdb_id}</strong><span>匹配方式：{item.match_method === "auto" ? "自动" : item.match_method === "message_evidence" ? "消息确认" : "人工"}</span></div>
+                <button type="button" className="button small" onClick={onUnlink}><Unlink size={14} />解除</button>
+              </div>
+            ) : null}
+
+            {!item.candidates?.length && item.tmdb_status !== "matched" && tmdbSearchFor !== item.id ? (
+              <div className="candidate-empty">
+                <Search size={22} />
+                <span>{tmdbConfigured ? "搜索 TMDB 生成候选结果" : "配置 TMDB 凭据后可搜索候选"}</span>
+                <button type="button" className="button primary" onClick={onSearch} disabled={!tmdbConfigured || loading}>搜索候选</button>
+              </div>
+            ) : null}
+
+            {tmdbSearchFor === item.id && item.candidates?.length ? <h4 className="saved-candidates-heading">已有候选</h4> : null}
+            <div className="candidate-list">
+              {item.candidates?.map((candidate) => (
+                <Candidate key={candidate.id} candidate={candidate} onLink={onLink} onReject={onReject} disabled={loading} />
+              ))}
+            </div>
+
+            {item.tmdb_status !== "matched" ? (
+              <form
+                className="manual-link"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!manual.tmdb_id) return;
+                  onLink({
+                    tmdb_id: Number(manual.tmdb_id),
+                    media_type: manual.media_type,
+                    score: 1,
+                  });
+                }}
+              >
+                <input type="number" min="1" placeholder="TMDB ID" value={manual.tmdb_id} onChange={(event) => setManual((current) => ({ ...current, tmdb_id: event.target.value }))} />
+                <select value={manual.media_type} onChange={(event) => setManual((current) => ({ ...current, media_type: event.target.value }))}><option value="movie">电影</option><option value="tv">剧集</option></select>
+                <button type="submit" className="button" disabled={!tmdbConfigured || loading}>手动关联</button>
+              </form>
+            ) : null}
+          </section>}
 
           {item.overview ? <p className="overview">{item.overview}</p> : null}
 
@@ -465,63 +618,49 @@ export default function Inspector({
             ) : null}
           </section>
 
+          {item.original_messages?.length ? (
+            <section className="inspector-section">
+              <div className="section-title">
+                <h3>消息来源 <span>{item.original_messages.length}</span></h3>
+              </div>
+              <div className="origin-list">
+                {item.original_messages.slice(0, 4).map((message, index) => (
+                  <article className="origin-row" key={message.id}>
+                    <div className="origin-main">
+                      <strong title={message.channel_name || message.channel_username || ""}>
+                        {message.channel_name || message.channel_username || "未知频道"}
+                      </strong>
+                      <small>
+                        {message.message_id ? `#${message.message_id}` : "入库消息"}
+                        {message.published_at ? ` · ${formatDate(message.published_at)}` : ""}
+                      </small>
+                      {message.raw_text ? (
+                        <small className="origin-preview" title={messagePreview(message.raw_text)}>
+                          {messagePreview(message.raw_text)}
+                        </small>
+                      ) : null}
+                    </div>
+                    {message.message_url ? (
+                      <a className="origin-link" href={message.message_url} target="_blank" rel="noopener noreferrer">
+                        打开消息 <ExternalLink size={11} aria-hidden="true" />
+                      </a>
+                    ) : null}
+                    {message.raw_text ? (
+                      <details className="origin-content" open={index === 0}>
+                        <summary>{index === 0 ? "消息原文" : "查看完整消息"}</summary>
+                        <pre>{message.raw_text}</pre>
+                      </details>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+              {item.original_messages.length > 4 ? (
+                <p className="origin-more">另有 {item.original_messages.length - 4} 条来源消息</p>
+              ) : null}
+            </section>
+          ) : null}
+
           {!readOnly && <ImdbEvidence lookup={item.imdb_lookup} />}
-
-          {!readOnly && <section className="inspector-section candidate-section">
-            <div className="section-title">
-              <h3>TMDB 匹配候选</h3>
-              <div className="candidate-actions">
-                {item.tmdb_status !== "matched" ? <button type="button" className="icon-only" onClick={() => setTmdbSearchFor((current) => current === item.id ? null : item.id)} disabled={!tmdbConfigured || loading} title="手动搜索 TMDB" aria-label="手动搜索 TMDB" aria-expanded={tmdbSearchFor === item.id} aria-controls="manual-tmdb-search"><Search size={16} /></button> : null}
-                <button type="button" className="icon-only" onClick={onSearch} disabled={!tmdbConfigured || loading} title="重新刮削候选" aria-label="重新刮削候选">
-                  <RefreshCw size={16} className={loading ? "spin" : ""} />
-                </button>
-              </div>
-            </div>
-
-            {item.tmdb_status !== "matched" && tmdbSearchFor === item.id ? <div id="manual-tmdb-search"><TmdbSearch key={item.id} title={item.title} disabled={!tmdbConfigured || loading} onLink={onLink} /></div> : null}
-
-            {item.tmdb_status === "matched" ? (
-              <div className="matched-panel">
-                <Check size={18} />
-                <div><strong>已关联 TMDB #{item.tmdb_id}</strong><span>匹配方式：{item.match_method === "auto" ? "自动" : "人工"}</span></div>
-                <button type="button" className="button small" onClick={onUnlink}><Unlink size={14} />解除</button>
-              </div>
-            ) : null}
-
-            {!item.candidates?.length && item.tmdb_status !== "matched" && tmdbSearchFor !== item.id ? (
-              <div className="candidate-empty">
-                <Search size={22} />
-                <span>{tmdbConfigured ? "搜索 TMDB 生成候选结果" : "配置 TMDB 凭据后可搜索候选"}</span>
-                <button type="button" className="button primary" onClick={onSearch} disabled={!tmdbConfigured || loading}>搜索候选</button>
-              </div>
-            ) : null}
-
-            {tmdbSearchFor === item.id && item.candidates?.length ? <h4 className="saved-candidates-heading">已有候选</h4> : null}
-            <div className="candidate-list">
-              {item.candidates?.map((candidate) => (
-                <Candidate key={candidate.id} candidate={candidate} onLink={onLink} onReject={onReject} disabled={loading} />
-              ))}
-            </div>
-
-            {item.tmdb_status !== "matched" ? (
-              <form
-                className="manual-link"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (!manual.tmdb_id) return;
-                  onLink({
-                    tmdb_id: Number(manual.tmdb_id),
-                    media_type: manual.media_type,
-                    score: 1,
-                  });
-                }}
-              >
-                <input type="number" min="1" placeholder="TMDB ID" value={manual.tmdb_id} onChange={(event) => setManual((current) => ({ ...current, tmdb_id: event.target.value }))} />
-                <select value={manual.media_type} onChange={(event) => setManual((current) => ({ ...current, media_type: event.target.value }))}><option value="movie">电影</option><option value="tv">剧集</option></select>
-                <button type="submit" className="button" disabled={!tmdbConfigured || loading}>手动关联</button>
-              </form>
-            ) : null}
-          </section>}
         </div>
       ) : null}
     </aside>

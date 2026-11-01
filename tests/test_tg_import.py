@@ -439,8 +439,9 @@ class TgImportPipelineTests(unittest.TestCase):
         search.assert_not_called()
         with connect(self.db_path) as db:
             rows = db.execute("SELECT tmdb_status FROM media_items ORDER BY id").fetchall()
-        # 这条消息有直链和资源页两个来源，各自建了一部作品，都留在待匹配状态。
-        self.assertEqual([row["tmdb_status"] for row in rows], ["pending", "pending"])
+        # 直链与资源页的两个来源标题/年份相同，不再因为 📺/🎥 图标被拆成两部作品，
+        # 会聚合成一条待匹配记录。
+        self.assertEqual([row["tmdb_status"] for row in rows], ["pending"])
 
 
 if __name__ == "__main__":

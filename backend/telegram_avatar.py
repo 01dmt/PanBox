@@ -63,6 +63,15 @@ def fetch_public_channel_avatar(username: str | None) -> str | None:
     return value
 
 
+def cached_channel_avatar(username: str | None) -> Path | None:
+    """Return an already cached avatar without touching the network."""
+    username = normalize_channel_username(username)
+    if not username:
+        return None
+    target = AVATAR_CACHE_DIR / f"{username.casefold()}.jpg"
+    return target if target.exists() else None
+
+
 def cache_channel_avatar(username: str | None, *, force: bool = False) -> Path | None:
     """Download a Telegram avatar locally and reuse it for a bounded TTL."""
     username = normalize_channel_username(username)

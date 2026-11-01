@@ -45,7 +45,7 @@ export function displayMediaType(value) {
 
 export function displayResourceKind(value) {
   if (value === "person") return "人物";
-  if (value === "series") return "系列";
+  if (value === "series") return "合集";
   return "影视";
 }
 

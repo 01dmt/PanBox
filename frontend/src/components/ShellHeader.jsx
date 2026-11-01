@@ -18,7 +18,6 @@ const NAV_ITEMS = [
   { id: "movies", label: "电影", icon: Film },
   { id: "tv", label: "剧集", icon: Tv },
   { id: "resources", label: "资源库", icon: Layers3 },
-  { id: "series", label: "系列", icon: FolderOpen },
   { id: "pending", label: "待匹配", icon: CircleAlert, badgeKey: "pending" },
   { id: "imports", label: "入库记录", icon: FileClock },
   { id: "dashboard", label: "仪表盘", icon: LayoutDashboard },

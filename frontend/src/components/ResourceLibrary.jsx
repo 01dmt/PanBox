@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { formatBytes, formatDate, formatDateTime, formatNumber, posterUrl } from "../lib/format";
 
-const CLASS_LABELS = { media: "影视", collection: "资源包", music: "音乐", person: "人物", other: "其他" };
+const CLASS_LABELS = { media: "影视", collection: "合集", music: "音乐", person: "人物", other: "其他" };
 const TMDB_LABELS = { matched: "TMDB 已匹配", review: "待确认", not_found: "未找到", error: "匹配错误", unrecognized: "未识别" };
 const AVAILABILITY_LABELS = { available: "可用", pending: "待检查", invalid: "失效", unknown: "未知" };
 
@@ -407,8 +407,10 @@ function ResourceAssetCard({
 /* ==========================================================================
    High-Density Person Row Component
    ========================================================================== */
-function PersonRow({ group, onOpen }) {
+function GroupRow({ group, onOpen, kind = "person" }) {
   const availability = group.availability_counts || {};
+  const isSeries = kind === "series";
+  const Icon = isSeries ? Folder : UserRound;
   return (
     <div
       className="resource-person-dense-row"
@@ -419,7 +421,7 @@ function PersonRow({ group, onOpen }) {
       onClick={() => onOpen(group.id)}
     >
       <div className="person-avatar-col">
-        <UserRound size={16} />
+        <Icon size={16} />
       </div>
 
       <strong className="person-name-col" title={group.title}>
@@ -427,7 +429,7 @@ function PersonRow({ group, onOpen }) {
       </strong>
 
       <div className="person-count-col">
-        <span>{formatNumber(group.resource_count)} 条资源</span>
+        <span>{formatNumber(group.resource_count)} 条{isSeries ? "链接" : "资源"}</span>
         <small>({formatNumber(availability.available || 0)} 可用)</small>
       </div>
 
@@ -456,7 +458,9 @@ function PersonRow({ group, onOpen }) {
 
 export function PersonResources({
   group,
+  loading = false,
   onBack,
+  backLabel,
   selectedId,
   onSelect,
   onAction,
@@ -465,6 +469,8 @@ export function PersonResources({
 }) {
   const [page, setPage] = useState(1);
   const availability = group.availability_counts || {};
+  const isSeries = group.resource_class === "collection";
+  const resolvedBackLabel = backLabel || (isSeries ? "返回合集列表" : "返回人物列表");
   const pageSize = 50;
   const resources = group.resources || [];
   const pages = Math.max(1, Math.ceil(resources.length / pageSize));
@@ -480,7 +486,7 @@ export function PersonResources({
       <div className="resource-person-detail-top">
         <button type="button" className="resource-back-btn" onClick={onBack}>
           <ArrowLeft size={16} />
-          <span>返回人物列表</span>
+          <span>{resolvedBackLabel}</span>
         </button>
         <div className="resource-person-head-info">
           <h2>{group.title}</h2>
@@ -493,14 +499,20 @@ export function PersonResources({
         </div>
       </div>
 
-      <ResourceTableView
-        items={visible}
-        selectedId={selectedId}
-        onSelect={onSelect}
-        onAction={onAction}
-        onCheck={onCheck}
-        checkingId={checkingId}
-      />
+      {loading && !resources.length ? (
+        <div className="resource-list-loading" role="status">
+          正在加载该分组的资源…
+        </div>
+      ) : (
+        <ResourceTableView
+          items={visible}
+          selectedId={selectedId}
+          onSelect={onSelect}
+          onAction={onAction}
+          onCheck={onCheck}
+          checkingId={checkingId}
+        />
+      )}
 
       {pages > 1 && (
         <footer className="resource-library-pagination">
@@ -525,7 +537,7 @@ export function PersonResources({
 export default function ResourceLibrary({
   items = [],
   loading,
-  grouped = false,
+  grouped = "",
   selectedId,
   onSelect,
   total = 0,
@@ -538,8 +550,10 @@ export default function ResourceLibrary({
   onCheck,
   checkingId,
   onClearFilters,
-  onOpenPerson,
+  onOpenGroup,
 }) {
+  const groupKind = grouped === true ? "person" : grouped;
+  const isGrouped = Boolean(groupKind);
   const [layoutMode, setLayoutMode] = useState(() => {
     try {
       return localStorage.getItem("panbox-resource-layout-mode") || "table";
@@ -571,14 +585,16 @@ export default function ResourceLibrary({
         <div className="resource-header-left">
           <h1 className="resource-header-title">资源库</h1>
           <p className="resource-header-desc">
-            {grouped
+            {groupKind === "person"
               ? "按人物自动归类，一览全部人物创作者及其关联的跨网盘资源。"
-              : "高信息密度资产清单，一屏纵览各网盘资源、技术规格与健康状态。"}
+              : groupKind === "series"
+                ? "按系列/合集自动归类，点开一条合集即可查看它的全部来源链接。"
+                : "高信息密度资产清单，一屏纵览各网盘资源、技术规格与健康状态。"}
           </p>
         </div>
         <div className="resource-header-count">
           <strong>{formatNumber(total)}</strong>
-          <span>{grouped ? "位人物" : "条来源"}</span>
+          <span>{groupKind === "person" ? "位人物" : groupKind === "series" ? "个合集" : "条来源"}</span>
         </div>
       </header>
 
@@ -602,12 +618,12 @@ export default function ResourceLibrary({
         </div>
       )}
 
-      {/* Grouped Person Rows */}
-      {!loading && items.length > 0 && grouped && (
-        <div className="resource-person-table" role="table" aria-label="人物列表">
+      {/* Grouped Person / Series Rows */}
+      {!loading && items.length > 0 && isGrouped && (
+        <div className="resource-person-table" role="table" aria-label={groupKind === "series" ? "合集列表" : "人物列表"}>
           <div className="resource-person-table-head" role="row">
-            <span className="col-avatar">头像</span>
-            <span className="col-name">姓名</span>
+            <span className="col-avatar">{groupKind === "series" ? "合集" : "头像"}</span>
+            <span className="col-name">{groupKind === "series" ? "合集名称" : "姓名"}</span>
             <span className="col-count">资源与可用</span>
             <span className="col-tags">标签</span>
             <span className="col-providers">网盘平台分布</span>
@@ -615,14 +631,14 @@ export default function ResourceLibrary({
           </div>
           <div className="resource-person-table-body" role="rowgroup">
             {items.map((group) => (
-              <PersonRow key={group.id} group={group} onOpen={onOpenPerson} />
+              <GroupRow key={group.id} group={group} onOpen={onOpenGroup} kind={groupKind} />
             ))}
           </div>
         </div>
       )}
 
       {/* Standard High-Density Table or Optional Grid Cards */}
-      {!loading && items.length > 0 && !grouped && (
+      {!loading && items.length > 0 && !isGrouped && (
         layoutMode === "table" ? (
           <ResourceTableView
             items={items}
@@ -691,7 +707,7 @@ export default function ResourceLibrary({
           </div>
 
           <div className="resource-page-total">
-            共 {formatNumber(total)} {grouped ? "位人物" : "条来源"}
+            共 {formatNumber(total)} {groupKind === "person" ? "位人物" : groupKind === "series" ? "个合集" : "条来源"}
           </div>
         </footer>
       )}
@@ -725,6 +741,35 @@ function CopyButton({ value, label = "复制" }) {
 }
 
 /* Centered Modal Dialog for Resource Inspection (Clean Default + Click-to-Expand Raw Messages on Right) */
+function RawMessageCard({ message, repeat = false }) {
+  return (
+    <article className={`resource-raw-card ${repeat ? "is-repeat" : ""}`}>
+      <div className="resource-raw-card-head">
+        <div className="resource-raw-channel">
+          <strong>{message.channel_name || "未知频道"}</strong>
+          {message.message_url && (
+            <a
+              href={message.message_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="resource-raw-link"
+              title="在 Telegram 中查看原消息"
+            >
+              <ExternalLink size={12} />
+            </a>
+          )}
+        </div>
+        <small className="resource-raw-time">
+          {message.received_at ? formatDateTime(message.received_at) : ""}
+        </small>
+      </div>
+      <div className="resource-raw-content">
+        <pre>{message.raw_text || "无正文内容"}</pre>
+      </div>
+    </article>
+  );
+}
+
 export function ResourceDetail({
   item,
   loading,
@@ -1013,32 +1058,7 @@ export function ResourceDetail({
 
                     <div className="resource-raw-messages-list">
                       {item.original_messages?.length ? (
-                        item.original_messages.map((m) => (
-                          <article className="resource-raw-card" key={m.id}>
-                            <div className="resource-raw-card-head">
-                              <div className="resource-raw-channel">
-                                <strong>{m.channel_name || "未知频道"}</strong>
-                                {m.message_url && (
-                                  <a
-                                    href={m.message_url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="resource-raw-link"
-                                    title="在 Telegram 中查看原消息"
-                                  >
-                                    <ExternalLink size={12} />
-                                  </a>
-                                )}
-                              </div>
-                              <small className="resource-raw-time">
-                                {m.received_at ? formatDateTime(m.received_at) : ""}
-                              </small>
-                            </div>
-                            <div className="resource-raw-content">
-                              <pre>{m.raw_text || "无正文内容"}</pre>
-                            </div>
-                          </article>
-                        ))
+                        item.original_messages.map((m) => <RawMessageCard key={m.id} message={m} />)
                       ) : (
                         <article className="resource-raw-card">
                           <div className="resource-raw-card-head">
@@ -1052,6 +1072,16 @@ export function ResourceDetail({
                           </div>
                         </article>
                       )}
+                      {item.repeat_messages?.length ? (
+                        <details className="resource-raw-repeats">
+                          <summary>
+                            另有 {item.repeat_messages.length} 条消息发过同一链接（重复投稿，默认收起）
+                          </summary>
+                          {item.repeat_messages.map((m) => (
+                            <RawMessageCard key={m.id} message={m} repeat />
+                          ))}
+                        </details>
+                      ) : null}
                     </div>
                   </section>
                 </div>

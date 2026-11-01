@@ -5,7 +5,8 @@ from pathlib import Path
 
 from backend.importers import ParsedSource, iter_share_sources
 from backend.repository import import_content
-from backend.resource_metadata import infer_class, source_resource_kind
+from backend.resource_metadata import av_code, infer_class, source_resource_kind
+from backend.repository import get_media, get_stats, list_media, pending_media_ids
 from backend.resources import get_resource, get_resource_filters, list_resources, update_resource
 from backend.schema import connect, init_db
 
@@ -61,7 +62,8 @@ class ResourceQueryTests(unittest.TestCase):
         options = get_resource_filters(self.db)
         self.assertIn("115", [item["id"] for item in options["providers"]])
         self.assertIn("123", [item["id"] for item in options["providers"]])
-        self.assertEqual(options["resource_classes"]["collection"], "资源包")
+        self.assertEqual(options["resource_classes"]["collection"], "合集")
+        self.assertEqual(options["resource_classes"]["nsfw"], "成人/NSFW")
 
     def test_resource_summary_keeps_global_quick_filter_counts(self):
         result = list_resources(resource_class="collection", db_path=self.db)
@@ -70,10 +72,46 @@ class ResourceQueryTests(unittest.TestCase):
         self.assertEqual(result["summary"]["unrecognized"], 1)
         self.assertEqual(result["summary"]["series"], 1)
 
+    def test_cached_summary_and_filters_refresh_after_source_change(self):
+        before = list_resources(db_path=self.db)
+        get_resource_filters(self.db)
+        self.assertEqual(before["summary"]["total"], 2)
+        import_content("cache", "cache.txt", db_path=self.db, parsed_sources=[
+            ParsedSource(
+                source_type="115", provider="quark", source_key="quark:cache", title="缓存测试", year=2026,
+                media_type="movie", raw_label="缓存测试", raw_text="缓存测试 https://pan.quark.cn/s/cache",
+                url="https://pan.quark.cn/s/cache", quality="1080P",
+            ),
+        ])
+        with connect(self.db) as db:
+            db.execute("UPDATE source_records SET tags_json='[\"新标签\"]' WHERE source_key='quark:cache'")
+        after = list_resources(db_path=self.db)
+        options = get_resource_filters(self.db)
+        self.assertEqual(after["summary"]["total"], 3)
+        self.assertIn("quark", [item["id"] for item in options["providers"]])
+        self.assertIn("新标签", options["tags"])
+
+    def test_search_index_tracks_metadata_and_raw_text_updates(self):
+        resource_id = list_resources(db_path=self.db)["items"][0]["id"]
+        with connect(self.db) as db:
+            db.execute("UPDATE source_records SET metadata_json=?, raw_text=? WHERE id=?",
+                       (json.dumps({"extra": "UniqueMetaToken"}), "UniqueRawToken original message", resource_id))
+        self.assertEqual(list_resources(q="UniqueMetaToken", db_path=self.db)["total"], 1)
+        self.assertEqual(list_resources(q="UniqueRawToken", db_path=self.db)["total"], 1)
+        with connect(self.db) as db:
+            db.execute("UPDATE source_records SET metadata_json=?, raw_text=? WHERE id=?",
+                       (json.dumps({"extra": "ChangedMetaToken"}), "ChangedRawToken new message", resource_id))
+        self.assertEqual(list_resources(q="UniqueMetaToken", db_path=self.db)["total"], 0)
+        self.assertEqual(list_resources(q="UniqueRawToken", db_path=self.db)["total"], 0)
+        self.assertEqual(list_resources(q="ChangedMetaToken", db_path=self.db)["total"], 1)
+        self.assertEqual(list_resources(q="ChangedRawToken", db_path=self.db)["total"], 1)
+
     def test_resource_groups_are_fixed_top_level_categories(self):
         self.assertEqual(list_resources(resource_group="media", db_path=self.db)["total"], 0)
         self.assertEqual(list_resources(resource_group="person", db_path=self.db)["total"], 0)
         self.assertEqual(list_resources(resource_group="series", db_path=self.db)["total"], 1)
+        self.assertEqual(list_resources(resource_group="nsfw", db_path=self.db)["total"], 0)
+        self.assertEqual(list_resources(resource_group="other", db_path=self.db)["total"], 0)
         self.assertEqual(list_resources(resource_group="unrecognized", db_path=self.db)["total"], 1)
 
     def test_person_group_aggregates_sources_by_person_and_keeps_source_details(self):
@@ -94,8 +132,92 @@ class ResourceQueryTests(unittest.TestCase):
         self.assertEqual({item["id"] for item in grouped["items"][0]["resources"]}, {3, 4})
         self.assertTrue(all(item["person_name"] == "本田瞳" for item in grouped["items"][0]["resources"]))
         self.assertTrue(all(item["url_masked"].endswith("password=****") for item in grouped["items"][0]["resources"]))
+        lazy = list_resources(resource_group="person", aggregate="person", include_resources=False, db_path=self.db)
+        self.assertEqual(lazy["total"], 1)
+        self.assertEqual(lazy["items"][0]["resource_count"], 2)
+        self.assertEqual(lazy["items"][0]["resources"], [])
+        detail = list_resources(resource_group="person", aggregate="person", group_id=lazy["items"][0]["id"], db_path=self.db)
+        self.assertEqual(detail["total"], 1)
+        self.assertEqual({item["id"] for item in detail["items"][0]["resources"]}, {3, 4})
         with self.assertRaises(ValueError):
             list_resources(resource_group="series", aggregate="person", db_path=self.db)
+
+    def test_series_group_aggregates_collection_sources_and_keeps_all_links(self):
+        grouped = list_resources(resource_group="series", aggregate="series", db_path=self.db)
+        self.assertEqual(grouped["total"], 1)
+        self.assertEqual(grouped["source_total"], 1)
+        self.assertEqual(grouped["aggregated"], "series")
+        group = grouped["items"][0]
+        self.assertEqual(group["title"], "周星驰电影合集")
+        self.assertEqual(group["resource_class"], "collection")
+        self.assertEqual(group["resource_count"], 1)
+        self.assertEqual([item["id"] for item in group["resources"]], [2])
+        self.assertTrue(group["resources"][0]["url_masked"].endswith("pwd=****"))
+        with self.assertRaises(ValueError):
+            list_resources(resource_group="person", aggregate="series", db_path=self.db)
+
+    def test_bundle_collection_is_promoted_to_series(self):
+        source = ParsedSource(
+            source_type="115", provider="115", source_key="115:bundle-collection",
+            title="指环王 合集 全3部", year=None, media_type="unknown", raw_label="",
+            raw_text="📺 指环王 合集 全3部 https://115.com/s/bundle?password=abcd",
+            url="https://115.com/s/bundle?password=abcd", resource_kind="media",
+            metadata={"collection": True, "series_title": "指环王"},
+        )
+        import_content("bundle", "bundle.txt", db_path=self.db, parsed_sources=[source])
+        with connect(self.db) as db:
+            row = db.execute("SELECT id FROM media_items WHERE title='指环王 合集 全3部'").fetchone()
+        self.assertIsNotNone(row)
+        media = get_media(int(row["id"]), self.db)
+        self.assertEqual(media["resource_kind"], "series")
+        self.assertIsNotNone(media["series_id"])
+        self.assertEqual(media["tmdb_status"], "pending")
+
+    def test_single_file_with_collection_title_stays_media(self):
+        source = ParsedSource(
+            source_type="115", provider="115", source_key="115:single-collection-title",
+            title="教父 全3部", year=None, media_type="movie",
+            raw_label="The.Godfather.1972.mkv", filename="The.Godfather.1972.mkv",
+            raw_text="📺 教父 全3部",
+            url="https://115.com/s/single?password=abcd", resource_kind="media",
+            metadata={"collection": True, "series_title": "教父"},
+        )
+        import_content("single", "single.txt", db_path=self.db, parsed_sources=[source])
+        with connect(self.db) as db:
+            row = db.execute("SELECT id FROM media_items WHERE title='教父 全3部'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(get_media(int(row["id"]), self.db)["resource_kind"], "media")
+
+    def test_series_media_is_curated_and_not_in_work_queue(self):
+        stats = get_stats(self.db)["media"]
+        self.assertEqual(stats["total"], 1)  # only the movie; the collection is not a work
+        self.assertEqual(stats["pending"], 1)
+        self.assertEqual(pending_media_ids(10, self.db), [1])
+        self.assertEqual(list_media(db_path=self.db)["total"], 1)
+        self.assertEqual(get_media(2, self.db)["resource_kind"], "series")
+        self.assertEqual(list_resources(resource_group="series", aggregate="series", db_path=self.db)["items"][0]["title"], "周星驰电影合集")
+
+    def test_av_code_is_nsfw_and_kept_out_of_pending_queue(self):
+        source = ParsedSource(
+            source_type="115", provider="115", source_key="115:av-ssis-433",
+            title="SSIS-433] 交わる体液、濃密セックス", year=2022, media_type="movie",
+            raw_label="SSIS-433] 交わる体液、濃密セックス",
+            raw_text="📺 SSIS-433] 交わる体液、濃密セックス https://115.com/s/av?password=abcd",
+            url="https://115.com/s/av?password=abcd", filename="SSIS-433.mp4",
+        )
+        import_content("av", "av.txt", db_path=self.db, parsed_sources=[source])
+        with connect(self.db) as db:
+            row = db.execute("SELECT id, title FROM media_items WHERE title='SSIS-433'").fetchone()
+            source_row = db.execute("SELECT resource_class FROM source_records WHERE media_id=?", (row["id"],)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(source_row["resource_class"], "nsfw")
+        self.assertEqual(get_media(int(row["id"]), self.db)["title"], "SSIS-433")
+        stats = get_stats(self.db)["media"]
+        self.assertEqual(stats["pending"], 1)  # only the ordinary movie
+        self.assertEqual(stats["not_found"], 0)
+        self.assertEqual(pending_media_ids(10, self.db), [1])
+        self.assertEqual(list_media(status="pending", db_path=self.db)["total"], 1)
+        self.assertEqual(list_resources(resource_group="nsfw", db_path=self.db)["total"], 1)
 
     def test_groups_partition_sources_across_all_recognition_states(self):
         for status in ("pending", "review", "not_found", "error", "matched"):
@@ -104,16 +226,18 @@ class ResourceQueryTests(unittest.TestCase):
                     db.execute("UPDATE media_items SET tmdb_status=?, tmdb_id=?",
                                (status, 157336 if status == "matched" else None))
                 results = {group: list_resources(resource_group=group, db_path=self.db)
-                           for group in ("all", "media", "person", "series", "unrecognized")}
+                           for group in ("all", "media", "person", "series", "nsfw", "other", "unrecognized")}
                 groups = {group: {row["id"] for row in result["items"]}
                           for group, result in results.items()}
                 self.assertEqual(groups["person"], set())
                 self.assertEqual(groups["series"], {2})
+                self.assertEqual(groups["nsfw"], set())
+                self.assertEqual(groups["other"], set())
                 self.assertEqual(groups["media"], {1} if status == "matched" else set())
                 self.assertEqual(groups["unrecognized"], set() if status == "matched" else {1})
-                self.assertEqual(groups["all"], groups["media"] | groups["person"] | groups["series"] | groups["unrecognized"])
+                self.assertEqual(groups["all"], groups["media"] | groups["person"] | groups["series"] | groups["nsfw"] | groups["other"] | groups["unrecognized"])
                 self.assertEqual(sum(results[g]["total"] for g in groups if g != "all"), results["all"]["total"])
-                for group in ("media", "person", "series", "unrecognized"):
+                for group in ("media", "person", "series", "nsfw", "other", "unrecognized"):
                     self.assertEqual(results[group]["total"], results["all"]["summary"][group])
 
     def test_matched_without_tmdb_id_stays_in_unrecognized_group(self):
@@ -138,6 +262,43 @@ class ResourceQueryTests(unittest.TestCase):
     def test_explicit_person_or_series_kind_wins_over_title_keywords(self):
         self.assertEqual(infer_class("person", "音乐会合集", "unknown"), "person")
         self.assertEqual(infer_class("series", "欧美音乐会", "unknown"), "collection")
+
+    def test_av_codes_become_nsfw_titles(self):
+        self.assertEqual(av_code("SSIS-433] 交わる体液、濃密セックス"), "SSIS-433")
+        self.assertEqual(av_code("VENZ-005 [自提征用]"), "VENZ-005")
+        self.assertEqual(av_code("Spider-Man"), None)
+        self.assertEqual(av_code("S01E03"), None)
+        self.assertEqual(infer_class("media", "SSIS-433] 交わる体液", "unknown"), "nsfw")
+        self.assertEqual(infer_class("media", "SSIS-433] 交わる体液", "movie"), "nsfw")
+
+    def test_collection_classification_does_not_false_kill_real_titles(self):
+        self.assertEqual(infer_class("media", "成龙电影合集", "movie"), "collection")
+        self.assertEqual(infer_class("media", "金瓶梅……等等电影", "movie"), "collection")
+        self.assertEqual(infer_class("media", "诛仙合集篇", "tv"), "media")
+        self.assertEqual(infer_class("media", "性梦爱三部曲性", "movie"), "media")
+        self.assertEqual(infer_class("media", "Threesome Anthology", "movie"), "media")
+
+    def test_audio_files_and_concert_titles_are_music(self):
+        # 无损音频包的文件名里没有「音乐」二字，只有扩展名能认出来。
+        self.assertEqual(infer_class("media", "track01", "unknown", "01.黄昏.flac"), "music")
+        self.assertEqual(infer_class("media", "碟1", "unknown", "CD1/02.寂寞沙洲冷.ape"), "music")
+        # 演唱会标题里常带 Live，但真正的片名「Live and Let Die」不能被误判。
+        self.assertEqual(infer_class("media", "[谢安琪呐喊演唱会]Kay.Tse.Yelling.Live", "movie"), "music")
+        self.assertEqual(infer_class("media", "Live and Let Die", "movie", "Live.and.Let.Die.1973.mkv"), "media")
+        self.assertEqual(infer_class("media", "The Next 20 张敬轩演唱会", "movie"), "music")
+
+    def test_format_words_only_count_when_there_is_no_video_file(self):
+        # 115 分享没有文件名，只能靠标题里的格式词认出是音乐包。
+        self.assertEqual(infer_class("media", "齐秦 转flac分轨", "unknown", None), "music")
+        self.assertEqual(infer_class("media", "电影OST合集", "unknown", None), "music")
+        # 带 .mkv 的发布名里 FLAC 只是音轨，不能因此判成音乐。
+        self.assertEqual(
+            infer_class("media", "坏孩子的天空 BluRay 1080p x264 FLAC", "movie", "Kids.Return.1996.mkv"), "media"
+        )
+
+    def test_audio_only_attachments_are_counted_as_music(self):
+        # 剧集附带的 theme.mp3 也算音乐（用户要求计入，不排除）。
+        self.assertEqual(infer_class("media", "theme", "tv", "theme.mp3"), "music")
 
     def red_queen_source(self):
         return next(iter_share_sources(
@@ -266,6 +427,44 @@ class ResourceQueryTests(unittest.TestCase):
         self.assertEqual({row["id"]: json.loads(row["media_ids_json"]) for row in events},
                          {"ev-a": [by_title["浅野心"]["id"]], "ev-b": [by_title["小野六花"]["id"]]})
         self.assertEqual(leftovers, 1)  # 只有被提升的 小野六花 条目保留，两条分裂条目被清理
+
+    def test_person_profile_promotes_duplicate_media_collection(self):
+        person_context = "👤 加藤リナ\n🎂 生日：1990-06-04\n🏠 出生地：Tokyo, Japan"
+        with connect(self.db) as db:
+            media_id = db.execute(
+                "INSERT INTO media_items (title, normalized_title, year, media_type, resource_kind, tmdb_status, poster_path, series_id, created_at, updated_at) VALUES ('加藤莉娜 合集','加藤莉娜合集',NULL,'movie','media','review','/wrong.jpg',NULL,'x','x')"
+            ).lastrowid
+            db.execute(
+                "INSERT INTO source_records (media_id, source_type, provider, source_key, raw_label, raw_text, url, resource_class, metadata_json, created_at) VALUES (?, 'ed2k','ed2k','ed2k:profile','www.98T.la@ABS-209.mp4','x','ed2k://file','collection',?,'x')",
+                (media_id, json.dumps({"context": person_context, "resource_kind": "person"}, ensure_ascii=False)),
+            )
+            db.execute(
+                "INSERT INTO tmdb_candidates (media_id, tmdb_id, media_type, title, score, payload_json, created_at) VALUES (?, 999, 'movie', 'wrong', 0.9, '{}', 'x')",
+                (media_id,),
+            )
+            db.execute(
+                "INSERT INTO ingestion_events (id, event_id, service, channel_username, message_url, raw_text, status, media_ids_json, received_at) VALUES ('ev-profile','profile','telegram','Lsp115','https://t.me/Lsp115/profile',?,'duplicate',?,'x')",
+                (person_context, json.dumps([media_id])),
+            )
+            db.execute(
+                "INSERT INTO ingestion_links (ingestion_id, source_key, provider, source_type, url, status, media_id) VALUES ('ev-profile','ed2k:profile','ed2k','ed2k','ed2k://file','duplicate',?)",
+                (media_id,),
+            )
+            db.execute("DELETE FROM schema_migrations WHERE name='person_message_attribution_v2'")
+        init_db(self.db)
+        with connect(self.db) as db:
+            media = db.execute("SELECT id, title, normalized_title, year, media_type, resource_kind, tmdb_status, poster_path, resource_metadata_json FROM media_items WHERE id=?", (media_id,)).fetchone()
+            source = db.execute("SELECT media_id, resource_class FROM source_records WHERE source_key='ed2k:profile'").fetchone()
+            candidates = db.execute("SELECT COUNT(*) FROM tmdb_candidates WHERE media_id=?", (media_id,)).fetchone()[0]
+            event = db.execute("SELECT media_ids_json FROM ingestion_events WHERE id='ev-profile'").fetchone()
+        self.assertEqual(media["title"], "加藤リナ")
+        self.assertEqual(media["normalized_title"], "加藤リナ")
+        self.assertEqual((media["year"], media["media_type"], media["resource_kind"], media["tmdb_status"]), (None, "unknown", "person", "pending"))
+        self.assertIsNone(media["poster_path"])
+        self.assertIn("👤 加藤リナ", media["resource_metadata_json"])
+        self.assertEqual((source["media_id"], source["resource_class"]), (media_id, "person"))
+        self.assertEqual(candidates, 0)
+        self.assertEqual(json.loads(event["media_ids_json"]), [media_id])
 
     def test_person_tmdb_state_is_reset_during_migration(self):
         with connect(self.db) as db:

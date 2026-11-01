@@ -61,6 +61,19 @@ def _is_person_resource_channel(source: dict[str, Any]) -> bool:
     return bool(path_parts and path_parts[0].lstrip("@").casefold() == _PERSON_RESOURCE_CHANNEL_USERNAME)
 
 
+def _channel_parse_kwargs(source: dict[str, Any]) -> dict[str, str | None]:
+    """Pass the event's channel identity to the parser.
+
+    Channel layouts differ, so a channel's own rules must stay scoped to it.
+    Every parse entry point (webhook, retry, per-record reprocess) resolves the
+    channel the same way from the stored event.
+    """
+    return {
+        "channel": str(source.get("channel_username") or source.get("channel_name") or "") or None,
+        "message_url": str(source.get("message_url") or "") or None,
+    }
+
+
 def _lsp115_person_context(text: str, source: dict[str, Any]) -> str | None:
     """Extract a compact person heading for Lsp115's inline profile format."""
     if not _is_person_resource_channel(source):
@@ -94,6 +107,11 @@ def _lsp115_person_context(text: str, source: dict[str, Any]) -> str | None:
     return "\n".join(context_lines)
 
 
+def auto_match_media(media_ids, db_path=None) -> dict[int, str]:
+    """Run high-confidence TMDB matching for media created or retitled by any entry point."""
+    return _auto_match_media({int(value) for value in media_ids or ()}, db_path)
+
+
 def _auto_match_media(media_ids: set[int], db_path=None) -> dict[int, str]:
     """Run the normal TMDB matcher for media created by an incoming message.
 
@@ -113,20 +131,28 @@ def _auto_match_media(media_ids: set[int], db_path=None) -> dict[int, str]:
     results: dict[int, str] = {}
     with connect(db_path) as db:
         kinds = {
-            int(row["id"]): (str(row["resource_kind"]), int(row["is_bundle"] or 0))
+            int(row["id"]): (
+                str(row["resource_kind"]),
+                int(row["is_bundle"] or 0),
+                int(row["is_metadata"] or 0),
+            )
             for row in db.execute(
-                "SELECT id, resource_kind, is_bundle FROM media_items WHERE id IN (%s)" % ",".join("?" * len(media_ids)),
+                "SELECT id, resource_kind, is_bundle, is_metadata FROM media_items WHERE id IN (%s)" % ",".join("?" * len(media_ids)),
                 sorted(media_ids),
             )
         }
     for media_id in sorted(media_ids):
         # 人物条目不是 TMDB 影视作品：不参与匹配，也不记录“匹配错误”。
-        if (kinds.get(media_id) or ("media", 0))[0] == "person":
+        if (kinds.get(media_id) or ("media", 0, 0))[0] == "person":
             results[media_id] = "skipped_person"
             continue
         # 整个系列打成一个分享时拆不出成员，按单片匹配只会错绑其中一部。
-        if (kinds.get(media_id) or ("media", 0))[1]:
+        if (kinds.get(media_id) or ("media", 0, 0))[1]:
             results[media_id] = "skipped_bundle"
+            continue
+        # 纯海报/NFO/字幕/歌词包没有可匹配的影视内容，直接跳过。
+        if (kinds.get(media_id) or ("media", 0, 0))[2]:
+            results[media_id] = "skipped_metadata"
             continue
         try:
             result = search_media(
@@ -322,11 +348,15 @@ def _run_validation_and_import(ingestion_id: str, text: str, sources, db_path=No
             db.execute(
                 """
                 INSERT INTO ingestion_links(ingestion_id,source_key,provider,source_type,url,status,media_id)
-                VALUES(?,?,?,?,?,'pending_validation',NULL)
+                -- 来源若是重复投稿（同一 URL 之前已入库），这里先把已登记的作品带上，
+                -- 否则入库记录只显示「未知作品」，看不出这条消息入到了哪一部。
+                VALUES(?,?,?,?,?,'pending_validation',
+                       (SELECT media_id FROM source_records WHERE source_key=?))
                 ON CONFLICT(ingestion_id, source_key) DO UPDATE SET
-                    provider=excluded.provider, source_type=excluded.source_type, url=excluded.url
+                    provider=excluded.provider, source_type=excluded.source_type, url=excluded.url,
+                    media_id=COALESCE(ingestion_links.media_id, excluded.media_id)
                 """,
-                (ingestion_id, source.source_key, source.provider, source.source_type, source.url),
+                (ingestion_id, source.source_key, source.provider, source.source_type, source.url, source.source_key),
             )
 
     valid_sources = []
@@ -409,8 +439,10 @@ def _run_validation_and_import(ingestion_id: str, text: str, sources, db_path=No
                     # same event must not downgrade its own successful import.
                     status = "inserted"
                 db.execute(
-                    "UPDATE ingestion_links SET status=?, media_id=?, error=NULL, validation_error=NULL WHERE ingestion_id=? AND source_key=?",
-                    (status, media_id, ingestion_id, source.source_key),
+                    "UPDATE ingestion_links SET status=?,"
+                    " media_id=COALESCE(?, (SELECT media_id FROM source_records WHERE source_key=?)),"
+                    " error=NULL, validation_error=NULL WHERE ingestion_id=? AND source_key=?",
+                    (status, media_id, source.source_key, ingestion_id, source.source_key),
                 )
 
     # A retry may only contain the links that were pending; retain media IDs
@@ -418,6 +450,16 @@ def _run_validation_and_import(ingestion_id: str, text: str, sources, db_path=No
     with connect(db_path) as db:
         for row in db.execute("SELECT media_id FROM ingestion_links WHERE ingestion_id=? AND media_id IS NOT NULL", (ingestion_id,)):
             media_ids.add(int(row["media_id"]))
+
+    try:
+        # Bare episode suffixes (「凡人修仙传173」) are common on this channel.
+        # Normalize only the rows from this event, using the already matched
+        # base title as context; this keeps future episodes out of the queue.
+        from .retitle import normalize_episode_suffix_titles
+
+        normalize_episode_suffix_titles(apply=True, media_ids=media_ids, db_path=db_path)
+    except Exception:
+        logger.exception("episode suffix normalization failed ingestion_id=%s", ingestion_id)
 
     if pending:
         _set_event_status(ingestion_id, "pending_validation", media_ids, pending[0][1], db_path)
@@ -445,7 +487,7 @@ def process(ingestion_id: str, text: str, db_path=None, *, auto_match: bool = Tr
         person_context = _lsp115_person_context(text, event_source)
         expanded_text = expand_resource_pages(text, inherited_heading=person_context)
         kind = detect_source_kind(expanded_text)
-        sources = list(iter_sources(expanded_text, kind, person_context=person_context))
+        sources = list(iter_sources(expanded_text, kind, person_context=person_context, **_channel_parse_kwargs(event_source)))
         if not sources:
             with connect(db_path) as db:
                 db.execute("UPDATE ingestion_events SET status='ignored', error=?, processed_at=? WHERE id=?", ("未提取到支持的 115、123、光鸭或 ED2K 资源。", _now(), ingestion_id))
@@ -479,7 +521,7 @@ def retry_pending_validations(limit: int = 100, db_path=None) -> dict[str, int]:
         event_source = dict(row)
         person_context = _lsp115_person_context(row["raw_text"], event_source)
         expanded = expand_resource_pages(row["raw_text"], inherited_heading=person_context)
-        sources = list(iter_sources(expanded, detect_source_kind(expanded), person_context=person_context))
+        sources = list(iter_sources(expanded, detect_source_kind(expanded), person_context=person_context, **_channel_parse_kwargs(event_source)))
         with connect(db_path) as db:
             pending_keys = {
                 item["source_key"] for item in db.execute(
@@ -585,7 +627,7 @@ def retry_ingestion_event(ingestion_id: str, db_path=None) -> dict[str, Any]:
     person_context = _lsp115_person_context(row["raw_text"], dict(row))
     expanded = expand_resource_pages(row["raw_text"], inherited_heading=person_context)
     sources = [
-        source for source in iter_sources(expanded, detect_source_kind(expanded), person_context=person_context)
+        source for source in iter_sources(expanded, detect_source_kind(expanded), person_context=person_context, **_channel_parse_kwargs(dict(row)))
         if source.source_key in target_keys
     ]
     if sources:

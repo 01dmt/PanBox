@@ -1,0 +1,25 @@
+services:
+  panbox:
+    image: panbox:local
+    container_name: panbox
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      MEDIA_HOST: 0.0.0.0
+      MEDIA_PORT: "8088"
+      MEDIA_DB_PATH: /app/data/media.db
+      MEDIA_ADMIN_NETWORKS: "${MEDIA_ADMIN_NETWORKS:-127.0.0.1/32,::1/128}"
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

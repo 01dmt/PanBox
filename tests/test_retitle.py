@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 
 from backend.repository import connect, get_media, import_content, list_media, normalize_title
-from backend.retitle import describe_refresh, refresh_titles
+from backend.retitle import (
+    describe_episode_suffix_refresh,
+    describe_refresh,
+    normalize_episode_suffix_titles,
+    refresh_titles,
+    repair_episode_base_years,
+)
 
 
 def seed_legacy_title(db_path: Path, heading: str, *, stored_title: str, status: str = "not_found") -> int:
@@ -36,8 +42,9 @@ class RefreshTitlesTests(unittest.TestCase):
 
     def test_apply_fixes_title_and_reopens_matching(self) -> None:
         media_id = seed_legacy_title(self.db_path, "名称：飞驰人生2（2024）", stored_title="名称：飞驰人生2")
-        refresh_titles(apply=True, db_path=self.db_path)
+        result = refresh_titles(apply=True, db_path=self.db_path)
         item = get_media(media_id, self.db_path)
+        self.assertEqual(result["changed_ids"], [media_id])
         self.assertEqual(item["title"], "飞驰人生2")
         self.assertEqual(item["year"], 2024)
         self.assertEqual(item["tmdb_status"], "pending")
@@ -49,6 +56,80 @@ class RefreshTitlesTests(unittest.TestCase):
         result = refresh_titles(apply=True, db_path=self.db_path)
         self.assertEqual(result["changed"], 0)
         self.assertEqual(get_media(media_id, self.db_path)["title"], "名称：飞驰人生2")
+
+    def test_episode_suffix_is_only_applied_with_a_tv_sibling(self) -> None:
+        import_content("📺 牧神记79 (2024)\nhttps://115.com/s/suffix-a", "test.txt", db_path=self.db_path)
+        import_content("📺 牧神记80 (2024)\nhttps://115.com/s/suffix-b", "test.txt", db_path=self.db_path)
+        import_content("📺 流浪地球2 (2024)\nhttps://115.com/s/suffix-movie", "test.txt", db_path=self.db_path)
+        with connect(self.db_path) as connection:
+            rows = connection.execute("SELECT id, title FROM media_items ORDER BY id").fetchall()
+            first, second, movie = [int(row["id"]) for row in rows]
+            connection.execute("UPDATE media_items SET media_type='tv' WHERE id=?", (first,))
+            connection.execute("UPDATE media_items SET media_type='unknown' WHERE id=?", (second,))
+            connection.execute("UPDATE media_items SET media_type='movie' WHERE id=?", (movie,))
+            connection.execute("UPDATE source_records SET season=1 WHERE media_id IN (?, ?)", (first, second))
+
+        preview = normalize_episode_suffix_titles(db_path=self.db_path)
+        self.assertEqual(preview["changed"], 2)
+        self.assertIn("--apply", describe_episode_suffix_refresh(preview, applied=False))
+        self.assertEqual(get_media(first, self.db_path)["title"], "牧神记79")
+
+        result = normalize_episode_suffix_titles(apply=True, db_path=self.db_path)
+        self.assertEqual(set(result["changed_ids"]), {first, second})
+        with connect(self.db_path) as connection:
+            items = connection.execute(
+                "SELECT id, title, media_type, tmdb_status FROM media_items ORDER BY id"
+            ).fetchall()
+            episodes = connection.execute(
+                "SELECT media_id, season, episode FROM source_records WHERE media_id IN (?, ?) ORDER BY media_id",
+                (first, second),
+            ).fetchall()
+        self.assertEqual([(row["title"], row["media_type"], row["tmdb_status"]) for row in items], [
+            ("牧神记", "tv", "pending"),
+            ("牧神记", "tv", "pending"),
+            ("流浪地球2", "movie", "pending"),
+        ])
+        self.assertEqual([(row["season"], row["episode"]) for row in episodes], [(1, 79), (1, 80)])
+
+    def test_episode_suffix_can_use_a_matched_base_title(self) -> None:
+        import_content("📺 凡人修仙传 (2020)\nhttps://115.com/s/fanren-base", "test.txt", db_path=self.db_path)
+        import_content("📺 凡人修仙传173 (2020-07-25)\nhttps://115.com/s/fanren-173", "test.txt", db_path=self.db_path)
+        with connect(self.db_path) as connection:
+            rows = connection.execute("SELECT id, title FROM media_items ORDER BY id").fetchall()
+            base_id, target_id = [int(row["id"]) for row in rows]
+            connection.execute(
+                "UPDATE media_items SET media_type='tv', tmdb_status='matched', tmdb_id=106449 WHERE id=?",
+                (base_id,),
+            )
+            connection.execute("UPDATE media_items SET media_type='unknown' WHERE id=?", (target_id,))
+            connection.execute("UPDATE source_records SET season=1 WHERE media_id=?", (target_id,))
+
+        result = normalize_episode_suffix_titles(
+            apply=True, media_ids={target_id}, db_path=self.db_path
+        )
+        self.assertEqual(result["changed_ids"], [target_id])
+        with connect(self.db_path) as connection:
+            item = connection.execute("SELECT title, media_type, tmdb_status FROM media_items WHERE id=?", (target_id,)).fetchone()
+            source = connection.execute("SELECT season, episode FROM source_records WHERE media_id=?", (target_id,)).fetchone()
+        self.assertEqual((item["title"], item["media_type"], item["tmdb_status"]), ("凡人修仙传", "tv", "pending"))
+        self.assertEqual((source["season"], source["episode"]), (1, 173))
+
+    def test_episode_year_repair_uses_unique_coverage(self) -> None:
+        for heading in ("📺 斗破苍穹 (2017) S01E170", "📺 斗破苍穹 (2018) S01E20", "📺 斗破苍穹170"):
+            import_content(f"{heading}\nhttps://115.com/s/{heading[-4:]}", "test.txt", db_path=self.db_path)
+        with connect(self.db_path) as connection:
+            rows = connection.execute("SELECT id, title FROM media_items ORDER BY id").fetchall()
+            first, second, target_id = [int(row["id"]) for row in rows]
+            connection.execute("UPDATE media_items SET media_type='tv', tmdb_status='matched', tmdb_id=79481 WHERE id=?", (first,))
+            connection.execute("UPDATE media_items SET media_type='tv', tmdb_status='matched', tmdb_id=81500 WHERE id=?", (second,))
+            connection.execute("UPDATE media_items SET title='斗破苍穹', media_type='tv' WHERE id=?", (target_id,))
+            connection.execute("UPDATE source_records SET episode=170 WHERE media_id=?", (target_id,))
+
+        preview = repair_episode_base_years(db_path=self.db_path)
+        self.assertEqual(preview["changed"], 1)
+        self.assertEqual(preview["changed_ids"], [target_id])
+        repair_episode_base_years(apply=True, db_path=self.db_path)
+        self.assertEqual(get_media(target_id, self.db_path)["year"], 2017)
 
     def test_collection_rows_are_linked_to_a_series(self) -> None:
         # 频道给系列里每一部单独发消息，标题只写系列名；重修要把它们聚到同一条系列。
@@ -71,6 +152,23 @@ class RefreshTitlesTests(unittest.TestCase):
         self.assertEqual(series[0]["title"], "007")
         self.assertIsNotNone(rows[0]["series_id"])
         self.assertEqual(rows[0]["series_id"], rows[1]["series_id"])
+
+    def test_collection_with_filename_does_not_overwrite_the_film_title(self) -> None:
+        import_content(
+            "📺 聊斋艳谭（系列）\n"
+            "ed2k://|file|山中艳谭（完整版）.1995.LDRip.2AC3.HKFACT_prob3.mp4|"
+            "6955916275|1B85B53629F4F596AFE87E1B14E7EFA8|/",
+            "test.txt",
+            db_path=self.db_path,
+        )
+        media_id = list_media(db_path=self.db_path)["items"][0]["id"]
+        with connect(self.db_path) as connection:
+            connection.execute("UPDATE media_items SET series_id = NULL WHERE id = ?", (media_id,))
+            connection.execute("DELETE FROM media_series")
+        refresh_titles(apply=True, db_path=self.db_path)
+        item = get_media(media_id, self.db_path)
+        self.assertEqual((item["title"], item["year"]), ("山中艳谭（完整版）", 1995))
+        self.assertIsNotNone(item["series_id"])
 
     def test_plain_rows_are_not_linked_to_a_series(self) -> None:
         seed_legacy_title(self.db_path, "📺 兰香如故 (2026) 全集", stored_title="兰香如故")

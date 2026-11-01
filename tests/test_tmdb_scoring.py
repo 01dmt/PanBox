@@ -10,7 +10,7 @@ from backend.repository import import_content, link_tmdb, list_media, get_media
 from backend.tmdb import (
     TmdbClient, TmdbError, bulk_match, collect_search_context, dated_candidates, ensure_tmdb_seasons, search_media,
     score_candidate, should_auto_link, tmdb_year,
-    matching_candidates,
+    matching_candidates, _title_variants,
 )
 
 
@@ -27,6 +27,60 @@ class FakeTmdbClient(TmdbClient):
 
 
 class TmdbScoringTests(unittest.TestCase):
+    def test_traditional_alias_is_searched_and_scored_as_same_title(self) -> None:
+        # TMDB 把 2007 年《魔女幼熙》的繁体译名记作「魔女遊戲」；简体查询
+        # 「魔女游戏」搜不到，必须同时尝试繁体，并在评分时视为同一标题。
+        self.assertIn("魔女遊戲", _title_variants("魔女游戏"))
+        score = score_candidate(
+            local_title="魔女游戏", local_year=2007, local_type="unknown",
+            candidate_title="魔女幼熙", candidate_original_title="마녀유희",
+            candidate_year=2007, candidate_type="tv", candidate_titles=["魔女遊戲"],
+        )
+        self.assertGreaterEqual(score, 0.99)
+
+    def test_quoted_context_title_fixes_channel_typo(self) -> None:
+        # 频道「名称」字段把「攻」写成「工」；剧情简介里的《雷霆特攻队*》
+        # 才是 TMDB 片名，应作为高相似度补充检索词，而不是丢掉。
+        context_text = "名称: 雷霆特工队4K\n剧情简介: 在《雷霆特攻队*》电影里，漫威组建了一支反英雄团队。"
+        item = {
+            "title": "雷霆特工队", "year": 2025, "media_type": "movie",
+            "sources": [{
+                "source_type": "115", "raw_label": "名称: 雷霆特工队4K",
+                "raw_text": "https://115.com/s/example?password=abcd",
+                "metadata_json": json.dumps({"context": context_text}, ensure_ascii=False),
+            }],
+        }
+        context = collect_search_context(item)
+        self.assertIn("雷霆特攻队", [term.title for term in context.primary_terms])
+
+    def test_bulk_match_can_refresh_without_auto_link(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "media.db"
+            import_content("Film (2020) https://115.com/s/example", "test.txt", db_path=db_path)
+            client = TmdbClient(api_key="test")
+            with patch("backend.tmdb.pending_media_ids", return_value=[1]), patch(
+                "backend.tmdb.search_media",
+                return_value={"status": "review", "removed_sources": 0},
+            ) as search:
+                result = bulk_match(1, db_path=db_path, client=client, workers=1, auto_link=False)
+            self.assertEqual(result["review"], 1)
+            self.assertFalse(search.call_args.kwargs["auto_link"])
+
+    def test_candidate_type_mismatch_blocks_auto_link(self) -> None:
+        candidate = {
+            "tmdb_id": 1,
+            "media_type": "tv",
+            "title": "同名",
+            "release_date": "2024-01-01",
+            "score": 0.99,
+            "match_evidence": {
+                "candidate_type_mismatch": True,
+                "primary_title_exact": True,
+                "title_exact": True,
+            },
+        }
+        self.assertFalse(should_auto_link([candidate]))
+
     @staticmethod
     def resource_item(title, year, names, complete=True):
         # Message-derived file names only; 115 directory snapshots are no
@@ -68,12 +122,84 @@ class TmdbScoringTests(unittest.TestCase):
         self.assertTrue(should_auto_link(FakeTmdbClient(respond).search(item)))
 
 
+    def test_edition_suffix_is_removed_before_searching(self) -> None:
+        context = collect_search_context({
+            "title": "山中艳谭（完整版）", "year": 1995, "media_type": "movie", "sources": [],
+        })
+        self.assertEqual(
+            [term.title for term in context.terms],
+            ["山中艳谭", "山中艳谭（完整版）", "山中豔譚", "山中豔譚（完整版）"],
+        )
+
+    def test_subtitle_filenames_are_not_search_terms(self) -> None:
+        item = {
+            "title": "浪客剑心", "year": 2021, "media_type": "movie",
+            "sources": [
+                {"source_type": "ed2k", "filename": "浪客剑心.mkv", "raw_label": "浪客剑心.mkv"},
+                {"source_type": "ed2k", "filename": "简体中文.srt", "raw_label": "简体中文.srt"},
+                {"source_type": "ed2k", "filename": "简体中字.ass", "raw_label": "简体中字.ass"},
+            ],
+        }
+        context = collect_search_context(item)
+        self.assertEqual([term.title for term in context.terms], ["浪客剑心", "浪客劍心"])
+        self.assertNotIn("简体中文", context.titles)
+        self.assertNotIn("srt", context.titles)
+
+    def test_single_title_takes_priority_over_filename_alias(self) -> None:
+        item = {
+            "title": "恐怖X档案", "year": 2022, "media_type": "movie",
+            "sources": [{"source_type": "ed2k", "filename": "X.2022.2022.2160p.WEB-DL.mkv",
+                         "raw_label": "X.2022.2022.2160p.WEB-DL.mkv"}],
+        }
+        context = collect_search_context(item)
+        self.assertEqual([term.title for term in context.primary_terms], ["恐怖X档案", "恐怖X檔案"])
+        self.assertEqual([term.title for term in context.fallback_terms], ["X"])
+
+        client = FakeTmdbClient(lambda p, q: {"results": [{
+            "id": 760104, "title": "恐怖X档案", "media_type": "movie", "release_date": "2022-08-18",
+        }]})
+        candidates = client.search(item)
+        self.assertEqual(candidates[0]["tmdb_id"], 760104)
+        queries = [params.get("query") for _, params in client.calls]
+        self.assertNotIn("X", queries)
+
+    def test_filename_alias_is_used_only_when_message_title_finds_nothing(self) -> None:
+        item = {
+            "title": "恐怖X档案", "year": 2022, "media_type": "movie",
+            "sources": [{"source_type": "ed2k", "filename": "X.2022.2160p.mkv",
+                         "raw_label": "X.2022.2160p.mkv"}],
+        }
+        client = FakeTmdbClient(lambda p, q: {"results": [{
+            "id": 760104, "title": "X", "original_title": "X",
+            "media_type": "movie", "release_date": "2022-08-18",
+        }] if q.get("query") == "X" else []})
+        candidates = client.search(item)
+        self.assertTrue(candidates)
+        self.assertIn("X", [params.get("query") for _, params in client.calls])
+
     def test_conflicting_resources_do_not_force_a_type(self) -> None:
         item = self.resource_item("Example", 2024, ["Example.2024.mkv", "Example.S01E01.2024.mkv"])
         context = collect_search_context(item)
         self.assertTrue(context.resource_conflict)
         result = {"id": 1, "title": "Example", "media_type": "movie", "release_date": "2024-01-01"}
         self.assertFalse(should_auto_link(FakeTmdbClient(lambda p, q: {"results": [result]}).search(item)))
+
+    def test_numeric_episode_filename_is_not_used_as_a_title(self) -> None:
+        item = self.resource_item("斗罗大陆Ⅱ绝世唐门", 2023, ["109.mp4"])
+        context = collect_search_context(item)
+        self.assertNotIn("109", [term.title for term in context.terms])
+        self.assertEqual(context.terms[0].title, "斗罗大陆Ⅱ绝世唐门")
+
+    def test_sidecar_files_do_not_create_a_resource_conflict(self) -> None:
+        item = self.resource_item("琅琊榜", 2015, [
+            "season01-poster.jpg",
+            "琅琊榜 - S01E01 - 化名进京.nfo",
+            "琅琊榜 - S01E01 - 化名进京.mp4",
+            "琅琊榜 - S01E02 - 风起长林.mp4",
+        ])
+        context = collect_search_context(item)
+        self.assertEqual(context.resource_kind, "tv")
+        self.assertFalse(context.resource_conflict)
 
     @staticmethod
     def language_candidates():
@@ -643,6 +769,25 @@ class TmdbScoringTests(unittest.TestCase):
         self.assertEqual(candidates[0]["score"], 0.88)
         self.assertTrue(should_auto_link(candidates))
 
+    def test_unique_exact_title_with_a_safe_suffix_can_auto_link(self) -> None:
+        candidate = {
+            "tmdb_id": 136315, "media_type": "tv", "title": "熊家餐馆",
+            "release_date": "2022-06-23", "score": 0.885,
+            "match_evidence": {
+                "local_title": "熊家餐馆S1-S3内封双语字幕",
+                "title_exact": True, "local_year_missing": True,
+            },
+        }
+        self.assertTrue(should_auto_link([candidate]))
+        sequel = {
+            **candidate,
+            "match_evidence": {
+                **candidate["match_evidence"],
+                "local_title": "犬夜叉:完结篇",
+            },
+        }
+        self.assertFalse(should_auto_link([sequel]))
+
     def test_adult_search_is_only_used_as_empty_result_fallback(self) -> None:
         result = {
             "id": 777,
@@ -754,6 +899,57 @@ class TmdbScoringTests(unittest.TestCase):
             self.assertEqual((source["season"], source["episode"]), (1, None))
             # 关联时顺手缓存 TMDB 季集基准，供详情页覆盖格子图使用。
             self.assertEqual(json.loads(item["seasons_json"]), [{"season": 1, "episode_count": 12}])
+
+    def test_later_season_uses_matched_series_anchor(self) -> None:
+        # 2026 是《黑色五叶草》第 2 季的播出年，不是另一部剧；TMDB 的
+        # first_air_date 仍是 2017，按年份搜索会把它过滤掉。已有同名片名
+        # 的已匹配剧集时，只有该年份确实是 TMDB 的某一季播出年才复用身份。
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "media.db"
+            import_content(
+                "📺 黑色五叶草 (2017) S02E01\n🔗 https://115.com/s/anchor?password=x",
+                "anchor.txt",
+                db_path=db,
+            )
+            import_content(
+                "📺 黑色五叶草 (2026)\n🏷 标签: #黑色五叶草 #剧集\n🔗 https://115.com/s/season2?password=y",
+                "season2.txt",
+                db_path=db,
+            )
+            items = list_media(db_path=db)["items"]
+            anchor = next(item for item in items if item["year"] == 2017)
+            later = next(item for item in items if item["year"] == 2026)
+            details = {
+                "tmdb_id": 73223, "media_type": "tv", "title": "黑色五叶草",
+                "original_title": "ブラッククローバー", "release_date": "2017-10-03",
+                "payload": {
+                    "id": 73223, "name": "黑色五叶草", "first_air_date": "2017-10-03",
+                    "seasons": [
+                        {"season_number": 1, "air_date": "2017-10-03", "episode_count": 170},
+                        {"season_number": 2, "air_date": "2026-10-03", "episode_count": 26},
+                    ],
+                },
+            }
+            link_tmdb(anchor["id"], details, 0.99, "test", db)
+
+            class FakeClient:
+                def search(self, item):
+                    return []
+
+                def imdb_fallback(self, item, client=None):
+                    return {"candidates": [], "evidence": None}
+
+                def details(self, media_type, tmdb_id):
+                    self.assert_media_type = media_type
+                    return details
+
+            result = search_media(later["id"], auto_link=True, db_path=db, client=FakeClient())
+            self.assertEqual(result["status"], "matched")
+            self.assertEqual(result["media_id"], anchor["id"])
+            self.assertIsNone(get_media(later["id"], db))
+            merged = get_media(anchor["id"], db)
+            self.assertEqual(merged["tmdb_id"], 73223)
+            self.assertEqual(len(merged["sources"]), 2)
 
     def test_ensure_tmdb_seasons_fills_cache_lazily(self) -> None:
         # 历史数据没有季集基准：查看详情时抓取一次并存库，之后直接读缓存。

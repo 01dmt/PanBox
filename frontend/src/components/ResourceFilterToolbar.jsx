@@ -1,9 +1,12 @@
 import { useState } from "react";
 import {
+  Archive,
+  EyeOff,
   Film,
   FolderOpen,
   LayoutGrid,
   List,
+  Music2,
   RotateCcw,
   Search,
   SlidersHorizontal,
@@ -15,9 +18,10 @@ import { formatNumber } from "../lib/format";
 const CLASS_OPTIONS = [
   ["all", "全部类型"],
   ["media", "影视"],
-  ["collection", "资源包"],
+  ["collection", "合集"],
   ["music", "音乐"],
   ["person", "人物"],
+  ["nsfw", "成人/NSFW"],
   ["other", "其他"],
 ];
 
@@ -44,8 +48,11 @@ const ADVANCED_FILTERS = ["year", "quality", "tag", "channel"];
 const GROUPS = [
   { id: "all", label: "全部", countKey: "total", Icon: LayoutGrid },
   { id: "media", label: "影视资源", countKey: "media", Icon: Film },
+  { id: "music", label: "音乐", countKey: "music", Icon: Music2 },
   { id: "person", label: "人物", countKey: "person", Icon: UserRound },
-  { id: "series", label: "系列", countKey: "series", Icon: FolderOpen },
+  { id: "series", label: "合集", countKey: "series", Icon: FolderOpen },
+  { id: "nsfw", label: "成人/NSFW", countKey: "nsfw", Icon: EyeOff },
+  { id: "other", label: "其他", countKey: "other", Icon: Archive },
   { id: "unrecognized", label: "未识别", countKey: "unrecognized", Icon: Search },
 ];
 

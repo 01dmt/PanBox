@@ -5,7 +5,6 @@ const ITEMS = [
   { id: "dashboard", label: "仪表盘", icon: LayoutDashboard },
   { id: "library", label: "影视库", icon: Library },
   { id: "resources", label: "资源库", icon: FolderInput },
-  { id: "series", label: "系列", icon: FolderOpen },
   { id: "imports", label: "入库", icon: FolderInput },
   { id: "settings", label: "设置", icon: Settings },
 ];

@@ -310,7 +310,7 @@ export default function Re0MovieDetail({
               <div className="re0-media-tags-row">
                 <span className="re0-collection-tag">
                   <FolderKanban size={14} />
-                  <span>系列资源 · {item.episode_count ? `${item.episode_count} 集` : "多季集合"}</span>
+                  <span>合集资源 · {item.episode_count ? `${item.episode_count} 集` : "多季集合"}</span>
                 </span>
               </div>
             )}

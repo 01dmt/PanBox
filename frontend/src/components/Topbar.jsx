@@ -5,7 +5,6 @@ const TITLES = {
   dashboard: "仪表盘",
   library: "影视库",
   resources: "资源库",
-  series: "系列",
   pending: "待匹配",
   duplicates: "多来源作品",
   imports: "入库记录",

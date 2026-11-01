@@ -65,7 +65,8 @@ export default function Re0PosterGrid({
     <section className="re0-grid-section" aria-label="影视网格">
       {loading ? (
         <div className="re0-poster-grid">
-          {Array.from({ length: 18 }, (_, index) => (
+          {/* 24 个占位卡能被 2/3/4/6 列整除，加载态同样是完整整行 */}
+          {Array.from({ length: 24 }, (_, index) => (
             <div className="re0-skeleton-card" key={index} />
           ))}
         </div>

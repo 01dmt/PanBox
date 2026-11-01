@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.venv
+.venv-p115
+.DS_Store
+data
+frontend/node_modules
+frontend/dist
+tests
+docs
+design
+**/__pycache__
+*.pyc

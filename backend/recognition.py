@@ -80,7 +80,10 @@ _GENERIC_CONTEXT_RE = re.compile(
 )
 _TMDB_RE = re.compile(r"(?i)(?:tmdb|tmdbid)[=\-_ ]*(\d{2,10})")
 _SEASON_DIR_RE = re.compile(r"(?i)(?:season[ ._-]*\d+|S\d+|第[一二三四五六七八九十百零\d]+季|specials?)")
-_COLLECTION_RE = re.compile(r"(?i)(合集|collection|系列|全集|trilogy|quadrilogy|部曲|saga|duology|anthology|pack)")
+_COLLECTION_RE = re.compile(
+    r"(?i)(合集(?!篇)|合辑|合輯|套装|套裝|套盒|全系列|系列电影|系列電影|合集包|collection|系列|全集|"
+    r"trilogy|quadrilogy|部曲(?!性)|saga|duology|anthology|pack)"
+)
 _YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 
 

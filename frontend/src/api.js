@@ -6,7 +6,17 @@ async function request(path, options = {}) {
     },
     ...options,
   });
-  const payload = await response.json().catch(() => ({}));
+  const contentType = response.headers.get("content-type") || "";
+  if (response.status === 204) return {};
+  if (!contentType.includes("application/json")) {
+    const text = await response.text().catch(() => "");
+    if (!response.ok) {
+      throw new Error(text.slice(0, 200) || `请求失败 (${response.status})`);
+    }
+    throw new Error(text.trimStart().startsWith("<!doctype") ? "接口未就绪，请重启服务后重试" : "服务返回了非 JSON 数据");
+  }
+  const payload = await response.json().catch(() => null);
+  if (payload === null) throw new Error("服务返回了无法解析的数据");
   if (!response.ok) {
     throw new Error(payload.error || payload.detail || `请求失败 (${response.status})`);
   }
@@ -15,6 +25,10 @@ async function request(path, options = {}) {
 
 export function getStats() {
   return request("/api/stats");
+}
+
+export function getDashboardOverview(days = 30, signal) {
+  return request(`/api/dashboard/overview?days=${encodeURIComponent(days)}`, { signal });
 }
 
 export function getConfig() {
@@ -27,14 +41,6 @@ export function getIngestionConfig() {
 
 export function saveIngestionConfig(apiKey) {
   return request("/api/v1/settings/ingestion", { method: "POST", body: JSON.stringify({ api_key: apiKey }) });
-}
-
-export function getShareAudit() {
-  return request("/api/share-audit");
-}
-
-export function pauseShareAudit() {
-  return request("/api/share-audit/pause", { method: "POST", body: "{}" });
 }
 
 export function getImports() {
@@ -83,13 +89,7 @@ export function getMediaDetail(mediaId) {
   return request(`/api/media/${mediaId}`);
 }
 
-export function getSeries(signal) {
-  return request("/api/series", { signal });
-}
 
-export function getSeriesDetail(seriesId, signal) {
-  return request(`/api/series/${seriesId}`, { signal });
-}
 
 export function getResources(params, signal) {
   const query = new URLSearchParams();
@@ -97,6 +97,15 @@ export function getResources(params, signal) {
     if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
   });
   return request(`/api/resources?${query.toString()}`, { signal });
+}
+
+export function getResourceGroup(groupId, params, signal) {
+  const query = new URLSearchParams({ group_id: groupId });
+  Object.entries(params).forEach(([key, value]) => {
+    if (key === "include_resources" || key === "page" || key === "page_size") return;
+    if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
+  });
+  return request(`/api/resources/group?${query.toString()}`, { signal });
 }
 
 export function getResourceFilters() {

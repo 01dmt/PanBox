@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .importers import ParsedSource, content_digest, detect_source_kind, iter_sources, normalize_title
+from .importers import ParsedSource, canonical_share_url, content_digest, detect_source_kind, iter_sources, normalize_title
 from .schema import connect, init_db
-from .resource_metadata import clean_person_name, infer_class
-from .telegram_avatar import cache_channel_avatar, normalize_channel_username
+from .resource_metadata import av_code, classify_metadata_pack, clean_person_name, infer_class
+from .collection_markers import COLLECTION_RE
+from .telegram_avatar import cache_channel_avatar, cached_channel_avatar, normalize_channel_username
 
 
 def utc_now() -> str:
@@ -19,6 +21,84 @@ def utc_now() -> str:
 
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
+
+
+def refresh_metadata_flags(
+    connection: sqlite3.Connection,
+    media_ids: Iterable[int] | None = None,
+) -> int:
+    """Recompute ``media_items.is_metadata`` for the given (or all) works.
+
+    ``is_metadata`` only hides unmatched auxiliary packs from the pending queue;
+    a record with a confirmed TMDB identity is never hidden. If a pack later
+    gains a playable source, it returns to ``pending`` so matching can retry.
+    """
+    ids = sorted({int(media_id) for media_id in media_ids}) if media_ids is not None else None
+    if ids == []:
+        return 0
+    if ids is None:
+        rows = connection.execute(
+            """
+            SELECT m.id, m.title, m.tmdb_status, m.resource_kind, m.is_metadata, m.metadata_reason, s.filename
+            FROM media_items m
+            LEFT JOIN source_records s ON s.media_id = m.id
+            ORDER BY m.id, s.id
+            """
+        ).fetchall()
+    else:
+        placeholders = ",".join("?" * len(ids))
+        rows = connection.execute(
+            f"""
+            SELECT m.id, m.title, m.tmdb_status, m.resource_kind, m.is_metadata, m.metadata_reason, s.filename
+            FROM media_items m
+            LEFT JOIN source_records s ON s.media_id = m.id
+            WHERE m.id IN ({placeholders})
+            ORDER BY m.id, s.id
+            """,
+            ids,
+        ).fetchall()
+
+    titles: dict[int, str] = {}
+    statuses: dict[int, str] = {}
+    kinds: dict[int, str] = {}
+    previous: dict[int, tuple[int, str | None]] = {}
+    files: dict[int, list[str]] = {}
+    for row in rows:
+        media_id = int(row["id"])
+        titles[media_id] = str(row["title"] or "")
+        statuses[media_id] = str(row["tmdb_status"] or "")
+        kinds[media_id] = str(row["resource_kind"] or "media")
+        previous[media_id] = (int(row["is_metadata"] or 0), row["metadata_reason"])
+        files.setdefault(media_id, [])
+        if row["filename"] is not None:
+            files[media_id].append(row["filename"])
+
+    changed = 0
+    now = utc_now()
+    for media_id, title in titles.items():
+        is_metadata, reason = classify_metadata_pack(title, files.get(media_id, []))
+        if kinds[media_id] != "media" or statuses[media_id] == "matched":
+            # Person/series entries and confirmed TMDB links are not metadata packs.
+            is_metadata, reason = False, None
+        was_metadata = bool(previous[media_id][0])
+        if was_metadata == is_metadata and previous[media_id][1] == reason:
+            continue
+        changed += 1
+        connection.execute(
+            "UPDATE media_items SET is_metadata = ?, metadata_reason = ?, updated_at = ? WHERE id = ?",
+            (1 if is_metadata else 0, reason, now, media_id),
+        )
+        if was_metadata and not is_metadata and statuses[media_id] != "matched":
+            connection.execute(
+                """UPDATE media_items
+                   SET tmdb_status='pending', last_tmdb_error=NULL,
+                       match_confidence=NULL, match_method=NULL
+                   WHERE id=?""",
+                (media_id,),
+            )
+            connection.execute("DELETE FROM tmdb_candidates WHERE media_id = ?", (media_id,))
+            connection.execute("DELETE FROM imdb_lookups WHERE media_id = ?", (media_id,))
+    return changed
 
 
 def _compatible_media(
@@ -33,7 +113,7 @@ def _compatible_media(
         # 人物条目按名字聚合：忽略年份（生日/文件名年份会让同一人裂成多条），
         # 优先命中已有人物条目；找不到时允许把同名占位条目提升为人物。
         rows = connection.execute(
-            "SELECT * FROM media_items WHERE normalized_title = ? ORDER BY resource_kind != 'person', id",
+            "SELECT * FROM media_items WHERE normalized_title = ? ORDER BY resource_kind NOT IN ('person','series'), id",
             (normalized,),
         ).fetchall()
         return rows[0] if rows else None
@@ -115,6 +195,20 @@ def is_bundle_source(source: ParsedSource) -> bool:
 
 
 def ensure_media(connection: sqlite3.Connection, source: ParsedSource) -> int:
+    # AV 番号是稳定的作品标识：标题只用番号，媒体类型未知，归 NSFW。
+    # 在匹配前先归一化，避免同一部 AV 因日文宣传标题不同而裂成多条。
+    code = av_code(source.raw_label) or av_code(source.title) or av_code(source.filename)
+    if code:
+        metadata = dict(source.metadata or {})
+        metadata.pop('collection', None)
+        metadata.pop('series_title', None)
+        source = replace(
+            source,
+            title=code,
+            media_type='unknown',
+            resource_kind='media',
+            metadata=metadata,
+        )
     existing = _compatible_media(connection, source)
     now = utc_now()
     is_bundle = 1 if is_bundle_source(source) else 0
@@ -174,7 +268,98 @@ def _attach_collection(connection: sqlite3.Connection, media_id: int, source: Pa
         return
     if not source.metadata.get("collection"):
         return
-    attach_series(connection, media_id, source.title)
+    series_title = str(source.metadata.get("series_title") or source.title)
+    attach_series(connection, media_id, series_title)
+
+
+def _classify_source(connection: sqlite3.Connection, media_id: int, source: ParsedSource) -> str:
+    """Classify one source, letting its media's collection identity win.
+
+    A source of a collection can be an individual file (指环王1.mkv) whose own
+    filename has no 合集 marker.  The media title/series membership still makes
+    it part of the 合集 group.  Music and person classification always win.
+    """
+    inferred = infer_class(source.resource_kind, source.raw_label, source.media_type, source.filename)
+    if inferred in {"music", "person", "nsfw"}:
+        return inferred
+    media = connection.execute(
+        "SELECT title, resource_kind, is_bundle, series_id FROM media_items WHERE id = ?",
+        (media_id,),
+    ).fetchone()
+    if media and (
+        media["resource_kind"] == "series"
+        or bool(media["is_bundle"])
+        or media["series_id"] is not None
+        or COLLECTION_RE.search(str(media["title"] or ""))
+    ):
+        return "collection"
+    return inferred
+
+
+def promote_collection_container(connection: sqlite3.Connection, media_id: int) -> bool:
+    """Promote an unmatched whole-collection container to a series record.
+
+    A collection heading does not automatically mean the media row is a
+    container: ``指环王 全3部`` can still have one source per film.  Only
+    promote when *all* sources are collection-classified and either the row is
+    a filename-less bundle or it actually contains multiple sources.  Single
+    film rows that merely inherited a collection title stay ordinary works.
+    """
+    row = connection.execute(
+        "SELECT id, title, resource_kind, is_bundle, tmdb_status FROM media_items WHERE id = ?",
+        (media_id,),
+    ).fetchone()
+    if not row or row["resource_kind"] != "media" or row["tmdb_status"] == "matched":
+        return False
+    counts = connection.execute(
+        """
+        SELECT COUNT(*) AS total,
+               SUM(resource_class = 'collection') AS collections
+        FROM source_records WHERE media_id = ?
+        """,
+        (media_id,),
+    ).fetchone()
+    total = int(counts["total"] or 0)
+    collections = int(counts["collections"] or 0)
+    if not total or collections != total:
+        return False
+    # 「合集」是容器语义；「(系列)」不是。系列里的每一部常被来源分类器
+    # 标成 collection（因为媒体标题带系列名），把它们升成 series 会把
+    # 007/聊斋艳谭这类单片从作品库误删。只有标题或来源原文明确写了
+    # 合集/合辑的容器才提升；单个文件（如 指环王 全3部 里的某一部）
+    # 即使继承了合集标题也保留为作品。
+    source_text = connection.execute(
+        "SELECT COALESCE(GROUP_CONCAT(COALESCE(raw_label, '') || ' ' || COALESCE(raw_text, '')), '') FROM source_records WHERE media_id = ?",
+        (media_id,),
+    ).fetchone()[0]
+    title_is_container = bool(
+        re.search(r"(?:合集|合辑|合集包|合辑包|等等(?:电影|影片|资源))", f"{row['title'] or ''} {source_text or ''}")
+    )
+    if not title_is_container:
+        return False
+    if not bool(row["is_bundle"]) and total < 2:
+        return False
+    title = str(row["title"] or "").strip()
+    if not title:
+        return False
+    series_id = ensure_series(connection, title)
+    now = utc_now()
+    connection.execute(
+        """
+        UPDATE media_items
+        SET resource_kind = 'series', series_id = ?, media_type = 'unknown', year = NULL,
+            tmdb_status = 'pending', tmdb_id = NULL, tmdb_media_type = NULL,
+            tmdb_title = NULL, original_title = NULL, overview = NULL, poster_path = NULL,
+            backdrop_path = NULL, release_date = NULL, vote_average = NULL, genres_json = NULL,
+            origin_country_json = NULL, match_confidence = NULL, match_method = NULL,
+            last_tmdb_error = NULL, metadata_reason = NULL, updated_at = ?
+        WHERE id = ?
+        """,
+        (series_id, now, media_id),
+    )
+    connection.execute("DELETE FROM tmdb_candidates WHERE media_id = ?", (media_id,))
+    connection.execute("DELETE FROM imdb_lookups WHERE media_id = ?", (media_id,))
+    return True
 
 
 def insert_source(
@@ -214,7 +399,7 @@ def insert_source(
                 source.audio,
                 source.release_group,
                 json.dumps(source.metadata, ensure_ascii=False),
-                infer_class(source.resource_kind, source.raw_label, source.media_type),
+                _classify_source(connection, media_id, source),
                 utc_now(),
             ),
         )
@@ -229,11 +414,11 @@ def _refresh_duplicate_source(
     connection: sqlite3.Connection,
     source_id: int,
     source: ParsedSource,
-) -> None:
+) -> int | None:
     """Refresh parser-derived fields when a previously imported source improves."""
     row = connection.execute(
         """
-        SELECT s.media_id, m.tmdb_id, m.tmdb_status, m.media_type
+        SELECT s.media_id, m.tmdb_id, m.tmdb_status, m.media_type, m.resource_kind
         FROM source_records s
         JOIN media_items m ON m.id = s.media_id
         WHERE s.id = ?
@@ -241,20 +426,27 @@ def _refresh_duplicate_source(
         (source_id,),
     ).fetchone()
     if not row:
-        return
+        return None
 
     old_media_id = int(row["media_id"])
     media_id = old_media_id
     # A parser correction may move an old unknown placeholder into the proper
-    # work. Never move a source that already has an explicit or TMDB identity.
-    if row["tmdb_id"] is None and row["tmdb_status"] != "matched" and row["media_type"] == "unknown":
+    # work. An explicit 👤 person heading is stronger than an old movie/tv
+    # guess: the same files are often first posted under a media collection
+    # heading and later re-posted under the person profile. Promote that
+    # unmatched placeholder instead of leaving it as a bogus work.
+    # Never move a source that already has an explicit or TMDB identity.
+    if row["tmdb_id"] is None and row["tmdb_status"] != "matched" and (
+        row["media_type"] == "unknown" or source.resource_kind == "person"
+    ):
         media_id = ensure_media(connection, source)
 
     connection.execute(
         """
         UPDATE source_records
         SET media_id = ?, raw_label = ?, season = ?, season_end = ?, episode = ?, parsed_year = ?,
-            quality = ?, codec = ?, hdr = ?, audio = ?, release_group = ?, metadata_json = ?
+            quality = ?, codec = ?, hdr = ?, audio = ?, release_group = ?, metadata_json = ?,
+            resource_class = CASE WHEN ? = 'person' THEN 'person' ELSE resource_class END
         WHERE id = ?
         """,
         (
@@ -270,9 +462,17 @@ def _refresh_duplicate_source(
             source.audio,
             source.release_group,
             json.dumps(source.metadata, ensure_ascii=False),
+            source.resource_kind,
             source_id,
         ),
     )
+    if media_id != old_media_id:
+        # Keep every event that references this source pointing at its current
+        # owner, not just the event that happened to be processed last.
+        connection.execute(
+            "UPDATE ingestion_links SET media_id = ? WHERE source_key = ?",
+            (media_id, source.source_key),
+        )
 
     # Remove an empty placeholder work created by the old parser, but only when
     # it has no confirmed identity or remaining sources.
@@ -285,6 +485,10 @@ def _refresh_duplicate_source(
             """,
             (old_media_id,),
         )
+        if not connection.execute("SELECT 1 FROM media_items WHERE id=?", (old_media_id,)).fetchone():
+            connection.execute("DELETE FROM tmdb_candidates WHERE media_id=?", (old_media_id,))
+            connection.execute("DELETE FROM imdb_lookups WHERE media_id=?", (old_media_id,))
+    return media_id
 
 
 def remove_cancelled_source(
@@ -324,6 +528,8 @@ def remove_cancelled_source(
                     match_confidence=NULL, match_method=NULL, updated_at=? WHERE id=?""",
                     (utc_now(), media_id),
                 )
+        if connection.execute("SELECT 1 FROM media_items WHERE id = ?", (media_id,)).fetchone():
+            refresh_metadata_flags(connection, {media_id})
     return result
 
 
@@ -343,6 +549,7 @@ def import_content(
     inserted_source_keys: list[str] = []
     duplicate_source_keys: list[str] = []
     error_source_keys: list[str] = []
+    affected_media_ids: set[int] = set()
 
     with connect(db_path) as connection:
         cursor = connection.execute(
@@ -360,18 +567,30 @@ def import_content(
             total += 1
             try:
                 # Parser upgrades must not create empty works for an already imported source.
+                source_keys = {source.source_key}
+                if source.source_key.startswith("115:"):
+                    raw_url = source.source_key[4:]
+                    source_keys.add("115:" + canonical_share_url(raw_url))
+                    source_keys.add("115:" + canonical_share_url(raw_url) + "#")
                 existing = connection.execute(
-                    "SELECT id FROM source_records WHERE source_key = ?", (source.source_key,)
+                    "SELECT id, media_id FROM source_records WHERE source_key IN (%s)"
+                    % ",".join("?" * len(source_keys)),
+                    tuple(source_keys),
                 ).fetchone()
                 if existing:
                     duplicates += 1
                     duplicate_source_keys.append(source.source_key)
-                    _refresh_duplicate_source(connection, int(existing["id"]), source)
+                    affected_media_ids.add(int(existing["media_id"]))
+                    moved_media_id = _refresh_duplicate_source(connection, int(existing["id"]), source)
+                    if moved_media_id is not None:
+                        affected_media_ids.add(int(moved_media_id))
                     continue
                 media_id = ensure_media(connection, source)
+                affected_media_ids.add(int(media_id))
                 if insert_source(connection, media_id, import_id, source):
                     inserted += 1
                     inserted_source_keys.append(source.source_key)
+                    promote_collection_container(connection, media_id)
                 else:
                     duplicates += 1
                     duplicate_source_keys.append(source.source_key)
@@ -379,6 +598,7 @@ def import_content(
                 errors += 1
                 error_source_keys.append(source.source_key)
 
+        refresh_metadata_flags(connection, affected_media_ids)
         connection.execute(
             """
             UPDATE imports
@@ -400,6 +620,7 @@ def import_content(
         "inserted_source_keys": inserted_source_keys,
         "duplicate_source_keys": duplicate_source_keys,
         "error_source_keys": error_source_keys,
+        "media_ids": sorted(affected_media_ids),
     }
 
 
@@ -426,14 +647,29 @@ def get_stats(db_path: str | Path | None = None) -> dict[str, Any]:
             SELECT
                 COUNT(*) AS total,
                 SUM(tmdb_status = 'matched') AS matched,
-                SUM(tmdb_status != 'matched') AS pending,
-                SUM(tmdb_status = 'review') AS review,
+                SUM(tmdb_status != 'matched' AND resource_kind NOT IN ('person','series') AND is_bundle = 0
+                    AND NOT EXISTS (SELECT 1 FROM source_records sm WHERE sm.media_id = media_items.id AND sm.resource_class = 'music')
+                    AND NOT EXISTS (SELECT 1 FROM source_records sx WHERE sx.media_id = media_items.id AND sx.resource_class = 'nsfw')) AS pending,
+                SUM(tmdb_status = 'review' AND resource_kind NOT IN ('person','series')
+                    AND NOT EXISTS (SELECT 1 FROM source_records sm WHERE sm.media_id = media_items.id AND sm.resource_class = 'music')
+                    AND NOT EXISTS (SELECT 1 FROM source_records sx WHERE sx.media_id = media_items.id AND sx.resource_class = 'nsfw')) AS review,
+                SUM(tmdb_status = 'not_found' AND resource_kind NOT IN ('person','series') AND is_bundle = 0
+                    AND NOT EXISTS (SELECT 1 FROM source_records sm WHERE sm.media_id = media_items.id AND sm.resource_class = 'music')
+                    AND NOT EXISTS (SELECT 1 FROM source_records sx WHERE sx.media_id = media_items.id AND sx.resource_class = 'nsfw')) AS not_found,
+                SUM(tmdb_status = 'pending' AND resource_kind NOT IN ('person','series')
+                    AND NOT EXISTS (SELECT 1 FROM source_records sm WHERE sm.media_id = media_items.id AND sm.resource_class = 'music')
+                    AND NOT EXISTS (SELECT 1 FROM source_records sx WHERE sx.media_id = media_items.id AND sx.resource_class = 'nsfw')) AS unsearched,
+                SUM(tmdb_status = 'error' AND resource_kind NOT IN ('person','series')
+                    AND NOT EXISTS (SELECT 1 FROM source_records sm WHERE sm.media_id = media_items.id AND sm.resource_class = 'music')
+                    AND NOT EXISTS (SELECT 1 FROM source_records sx WHERE sx.media_id = media_items.id AND sx.resource_class = 'nsfw')) AS error,
                 SUM(media_type = 'movie') AS movies,
                 SUM(media_type = 'tv') AS tv,
                 SUM(media_type = 'unknown') AS unknown,
                 SUM(EXISTS (SELECT 1 FROM source_records s WHERE s.media_id = media_items.id)) AS with_sources,
-                SUM(NOT EXISTS (SELECT 1 FROM source_records s WHERE s.media_id = media_items.id)) AS without_sources
+                SUM(NOT EXISTS (SELECT 1 FROM source_records s WHERE s.media_id = media_items.id)) AS without_sources,
+                (SELECT COUNT(*) FROM media_items WHERE is_metadata = 1 AND resource_kind = 'media') AS metadata
             FROM media_items
+            WHERE is_metadata = 0 AND resource_kind NOT IN ('person','series')
             """
         ).fetchone()
         sources = connection.execute(
@@ -479,6 +715,278 @@ def get_stats(db_path: str | Path | None = None) -> dict[str, Any]:
         },
         "multi_source": int(duplicates["total"] or 0),
         "imports": int(imports["total"] or 0),
+    }
+
+
+def _dashboard_event_counts(row: sqlite3.Row | None) -> dict[str, Any]:
+    keys = ("received", "imported", "duplicate", "ignored", "failed", "pending_validation", "queued")
+    values = {key: int(row[key] or 0) if row is not None else 0 for key in keys}
+    values["pending"] = values["pending_validation"] + values["queued"]
+    processed = values["imported"] + values["duplicate"] + values["ignored"] + values["failed"]
+    values["processed"] = processed
+    values["success_rate"] = round(values["imported"] / processed, 4) if processed else None
+    return values
+
+
+def _dashboard_avatar_url(username: str | None) -> str | None:
+    """Only reuse avatars already on disk so the dashboard never waits on Telegram."""
+    normalized = normalize_channel_username(username)
+    if not normalized or not cached_channel_avatar(normalized):
+        return None
+    return f"/api/channel-avatar/{normalized}"
+
+
+def get_dashboard_overview(db_path: str | Path | None = None, days: int = 30) -> dict[str, Any]:
+    """Aggregate read-only dashboard data from local state.
+
+    "Today" and the trend use the server's local calendar day so the numbers
+    match what an operator sees in the ingestion records page. The previous
+    day is compared at the same clock time, because comparing a partial day
+    with a finished one would always look like a collapse.
+    """
+    days = min(max(int(days), 7), 90)
+    local_now = datetime.now().astimezone()
+    today = local_now.date()
+    yesterday = today - timedelta(days=1)
+    start_day = today - timedelta(days=days - 1)
+    start_utc = datetime.combine(start_day, time.min).astimezone(timezone.utc).isoformat(timespec="seconds")
+    same_time = local_now.strftime("%H:%M:%S")
+
+    with connect(db_path) as connection:
+        today_counts = _dashboard_event_counts(connection.execute(
+            """
+            SELECT COUNT(*) AS received,
+                   COALESCE(SUM(status = 'imported'), 0) AS imported,
+                   COALESCE(SUM(status = 'duplicate'), 0) AS duplicate,
+                   COALESCE(SUM(status = 'ignored'), 0) AS ignored,
+                   COALESCE(SUM(status = 'failed'), 0) AS failed,
+                   COALESCE(SUM(status = 'pending_validation'), 0) AS pending_validation,
+                   COALESCE(SUM(status = 'queued'), 0) AS queued
+            FROM ingestion_events
+            WHERE date(received_at, 'localtime') = ?
+            """,
+            (today.isoformat(),),
+        ).fetchone())
+        yesterday_counts = _dashboard_event_counts(connection.execute(
+            """
+            SELECT COUNT(*) AS received,
+                   COALESCE(SUM(status = 'imported'), 0) AS imported,
+                   COALESCE(SUM(status = 'duplicate'), 0) AS duplicate,
+                   COALESCE(SUM(status = 'ignored'), 0) AS ignored,
+                   COALESCE(SUM(status = 'failed'), 0) AS failed,
+                   COALESCE(SUM(status = 'pending_validation'), 0) AS pending_validation,
+                   COALESCE(SUM(status = 'queued'), 0) AS queued
+            FROM ingestion_events
+            WHERE date(received_at, 'localtime') = ?
+              AND datetime(received_at, 'localtime') <= ?
+            """,
+            (yesterday.isoformat(), f"{yesterday.isoformat()} {same_time}"),
+        ).fetchone())
+
+        trend_rows = connection.execute(
+            """
+            SELECT date(received_at, 'localtime') AS day,
+                   COUNT(*) AS received,
+                   COALESCE(SUM(status = 'imported'), 0) AS imported,
+                   COALESCE(SUM(status = 'duplicate'), 0) AS duplicate,
+                   COALESCE(SUM(status = 'ignored'), 0) AS ignored,
+                   COALESCE(SUM(status = 'failed'), 0) AS failed,
+                   COALESCE(SUM(status = 'pending_validation'), 0) AS pending_validation,
+                   COALESCE(SUM(status = 'queued'), 0) AS queued
+            FROM ingestion_events
+            WHERE received_at >= ?
+            GROUP BY day
+            """,
+            (start_utc,),
+        ).fetchall()
+
+        media = connection.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(tmdb_status = 'matched'), 0) AS matched,
+                   COALESCE(SUM(tmdb_status != 'matched'), 0) AS unmatched,
+                   COALESCE(SUM(tmdb_status = 'review'), 0) AS review,
+                   COALESCE(SUM(media_type = 'movie'), 0) AS movies,
+                   COALESCE(SUM(media_type = 'tv'), 0) AS tv
+            FROM media_items
+            WHERE is_metadata = 0 AND resource_kind NOT IN ('person','series')
+            """
+        ).fetchone()
+        sources = connection.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(file_size), 0) AS bytes,
+                   COALESCE(SUM(date(created_at, 'localtime') = ?), 0) AS added_today
+            FROM source_records
+            """,
+            (today.isoformat(),),
+        ).fetchone()
+        providers = connection.execute(
+            """
+            SELECT CASE WHEN source_type = 'ed2k' THEN 'ed2k' ELSE provider END AS provider_id,
+                   COUNT(*) AS total
+            FROM source_records
+            GROUP BY provider_id
+            ORDER BY total DESC, provider_id
+            """
+        ).fetchall()
+        backlog = connection.execute(
+            """
+            SELECT COALESCE(SUM(status = 'failed'), 0) AS failed,
+                   COALESCE(SUM(status = 'pending_validation'), 0) AS pending_validation,
+                   COALESCE(SUM(status = 'queued'), 0) AS queued
+            FROM ingestion_events
+            """
+        ).fetchone()
+        link_health = connection.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(status = 'inserted'), 0) AS inserted,
+                   COALESCE(SUM(status = 'duplicate'), 0) AS duplicate,
+                   COALESCE(SUM(status = 'invalid'), 0) AS invalid,
+                   COALESCE(SUM(status = 'pending_validation'), 0) AS pending,
+                   COALESCE(SUM(status = 'error'), 0) AS errors
+            FROM ingestion_links
+            """
+        ).fetchone()
+        channel_rows = connection.execute(
+            """
+            SELECT COALESCE(NULLIF(channel_username, ''), NULLIF(channel_id, ''), channel_name, 'unknown') AS channel_key,
+                   MAX(channel_name) AS channel_name,
+                   MAX(channel_username) AS channel_username,
+                   COUNT(*) AS received,
+                   COALESCE(SUM(status = 'imported'), 0) AS imported,
+                   MAX(received_at) AS last_received_at
+            FROM ingestion_events
+            WHERE received_at >= ?
+            GROUP BY channel_key
+            ORDER BY received DESC
+            LIMIT 6
+            """,
+            (start_utc,),
+        ).fetchall()
+
+        recent_rows = connection.execute(
+            """
+            SELECT id, service, channel_name, channel_username, status, error, received_at, media_ids_json
+            FROM ingestion_events
+            ORDER BY received_at DESC
+            LIMIT 8
+            """
+        ).fetchall()
+        recent_ids = [row["id"] for row in recent_rows]
+        recent_media_ids: set[int] = set()
+        parsed_media_ids: dict[str, list[int]] = {}
+        for row in recent_rows:
+            try:
+                values = json.loads(row["media_ids_json"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                values = []
+            ids = [int(value) for value in values if isinstance(value, int) or str(value).isdigit()]
+            parsed_media_ids[row["id"]] = ids
+            recent_media_ids.update(ids)
+
+        media_details: dict[int, dict[str, Any]] = {}
+        if recent_media_ids:
+            placeholders = ",".join("?" * len(recent_media_ids))
+            for row in connection.execute(
+                f"""
+                SELECT id, COALESCE(NULLIF(tmdb_title, ''), title) AS title,
+                       COALESCE(year, CASE
+                           WHEN substr(release_date, 1, 4) GLOB '[12][0-9][0-9][0-9]'
+                           THEN CAST(substr(release_date, 1, 4) AS INTEGER) END) AS year
+                FROM media_items WHERE id IN ({placeholders})
+                """,
+                tuple(recent_media_ids),
+            ).fetchall():
+                media_details[int(row["id"])] = {"id": int(row["id"]), "title": row["title"], "year": row["year"]}
+
+        recent_links: dict[str, dict[str, int]] = {}
+        if recent_ids:
+            placeholders = ",".join("?" * len(recent_ids))
+            for row in connection.execute(
+                f"""
+                SELECT ingestion_id, status, COUNT(*) AS total
+                FROM ingestion_links
+                WHERE ingestion_id IN ({placeholders})
+                GROUP BY ingestion_id, status
+                """,
+                tuple(recent_ids),
+            ).fetchall():
+                bucket = recent_links.setdefault(row["ingestion_id"], {"total": 0})
+                bucket[row["status"]] = int(row["total"] or 0)
+                bucket["total"] += int(row["total"] or 0)
+
+    trend_by_day = {row["day"]: _dashboard_event_counts(row) for row in trend_rows}
+    trend = []
+    for offset in range(days):
+        day = (start_day + timedelta(days=offset)).isoformat()
+        entry = trend_by_day.get(day) or _dashboard_event_counts(None)
+        trend.append({"date": day, **entry})
+
+    channels = [
+        {
+            "id": row["channel_key"],
+            "name": row["channel_name"] or row["channel_username"] or row["channel_key"],
+            "username": normalize_channel_username(row["channel_username"]),
+            "avatar_url": _dashboard_avatar_url(row["channel_username"]),
+            "received": int(row["received"] or 0),
+            "imported": int(row["imported"] or 0),
+            "last_received_at": row["last_received_at"],
+        }
+        for row in channel_rows
+    ]
+
+    recent = []
+    for row in recent_rows:
+        links = recent_links.get(row["id"], {"total": 0})
+        recent.append({
+            "id": row["id"],
+            "service": row["service"],
+            "channel_name": row["channel_name"] or row["channel_username"] or "未知频道",
+            "channel_username": normalize_channel_username(row["channel_username"]),
+            "avatar_url": _dashboard_avatar_url(row["channel_username"]),
+            "status": row["status"],
+            "error": row["error"],
+            "received_at": row["received_at"],
+            "media": [media_details[mid] for mid in parsed_media_ids.get(row["id"], []) if mid in media_details],
+            "links": links,
+        })
+
+    provider_rows = [{"id": row["provider_id"], "count": int(row["total"] or 0)} for row in providers]
+    return {
+        "generated_at": local_now.isoformat(timespec="seconds"),
+        "days": days,
+        "today": {**today_counts, "date": today.isoformat()},
+        "yesterday": {**yesterday_counts, "date": yesterday.isoformat(), "same_time": same_time},
+        "trend": trend,
+        "media": {
+            "total": int(media["total"] or 0),
+            "matched": int(media["matched"] or 0),
+            "unmatched": int(media["unmatched"] or 0),
+            "review": int(media["review"] or 0),
+            "movies": int(media["movies"] or 0),
+            "tv": int(media["tv"] or 0),
+            "match_rate": round(int(media["matched"] or 0) / int(media["total"]), 4) if media["total"] else None,
+        },
+        "sources": {
+            "total": int(sources["total"] or 0),
+            "bytes": int(sources["bytes"] or 0),
+            "added_today": int(sources["added_today"] or 0),
+            "providers": provider_rows,
+        },
+        "backlog": {
+            "failed_events": int(backlog["failed"] or 0),
+            "pending_events": int(backlog["pending_validation"] or 0) + int(backlog["queued"] or 0),
+            "invalid_links": int(link_health["invalid"] or 0),
+            "error_links": int(link_health["errors"] or 0),
+            "pending_links": int(link_health["pending"] or 0),
+            "checked_links": int(link_health["inserted"] or 0) + int(link_health["duplicate"] or 0)
+            + int(link_health["invalid"] or 0) + int(link_health["errors"] or 0),
+            "total_links": int(link_health["total"] or 0),
+        },
+        "channels": channels,
+        "recent": recent,
     }
 
 
@@ -552,7 +1060,7 @@ def list_media(
 ) -> dict[str, Any]:
     page = max(page, 1)
     page_size = min(max(page_size, 10), 100)
-    where = ["1 = 1"]
+    where = ["m.is_metadata = 0", "m.resource_kind != 'series'"]
     params: list[Any] = []
     if availability not in {"all", "available", "missing"}:
         raise ValueError("资源可用性筛选无效。")
@@ -609,11 +1117,20 @@ def list_media(
     if status == "matched":
         where.append("m.tmdb_status = 'matched'")
     elif status == "pending":
-        where.append("m.tmdb_status != 'matched'")
+        # Persons are resources, not works waiting for a TMDB match. NSFW/AV,
+        # collection containers and non-work "other" rows have no ordinary
+        # single-TMDB identity and must not occupy this queue.
+        where.append("m.tmdb_status != 'matched' AND m.resource_kind NOT IN ('person','series') AND m.is_bundle = 0"
+                     " AND NOT EXISTS (SELECT 1 FROM source_records sm WHERE sm.media_id = m.id AND sm.resource_class = 'music')"
+                     " AND NOT EXISTS (SELECT 1 FROM source_records sx WHERE sx.media_id = m.id AND sx.resource_class = 'nsfw')")
     elif status == "unsearched":
-        where.append("m.tmdb_status = 'pending'")
+        where.append("m.tmdb_status = 'pending' AND m.resource_kind NOT IN ('person','series')"
+                     " AND NOT EXISTS (SELECT 1 FROM source_records sm WHERE sm.media_id = m.id AND sm.resource_class = 'music')"
+                     " AND NOT EXISTS (SELECT 1 FROM source_records sx WHERE sx.media_id = m.id AND sx.resource_class = 'nsfw')")
     elif status in {"review", "not_found", "error"}:
-        where.append("m.tmdb_status = ?")
+        where.append("m.tmdb_status = ? AND m.resource_kind NOT IN ('person','series') AND m.is_bundle = 0"
+                     " AND NOT EXISTS (SELECT 1 FROM source_records sm WHERE sm.media_id = m.id AND sm.resource_class = 'music')"
+                     " AND NOT EXISTS (SELECT 1 FROM source_records sx WHERE sx.media_id = m.id AND sx.resource_class = 'nsfw')")
         params.append(status)
 
     if media_type in {"movie", "tv", "unknown"}:
@@ -741,9 +1258,39 @@ def list_media(
             query_sql,
             [*source_params, *params, page_size, (page - 1) * page_size],
         ).fetchall()
+        # 待匹配队列需要在不打开详情的情况下看到候选概况，因此按当前页批量取一次候选。
+        candidate_counts: dict[int, int] = {}
+        top_candidates: dict[int, dict[str, Any]] = {}
+        media_ids = [int(row["id"]) for row in rows]
+        if media_ids:
+            placeholders = ",".join("?" for _ in media_ids)
+            candidate_rows = connection.execute(
+                f"""
+                SELECT media_id, id, tmdb_id, media_type, title, release_date, poster_path, score
+                FROM tmdb_candidates
+                WHERE media_id IN ({placeholders})
+                ORDER BY media_id, score DESC, id
+                """,
+                media_ids,
+            ).fetchall()
+            for candidate in candidate_rows:
+                media_id = int(candidate["media_id"])
+                candidate_counts[media_id] = candidate_counts.get(media_id, 0) + 1
+                if media_id not in top_candidates:
+                    top_candidates[media_id] = dict(candidate)
+
+    items = []
+    for row in rows:
+        media_id = int(row["id"])
+        items.append({
+            **dict(row),
+            "matched_source_ids": [int(value) for value in (row["matched_source_ids"] or "").split(",") if value],
+            "candidate_count": candidate_counts.get(media_id, 0),
+            "top_candidate": top_candidates.get(media_id),
+        })
 
     return {
-        "items": [{**dict(row), "matched_source_ids": [int(value) for value in (row["matched_source_ids"] or "").split(",") if value]} for row in rows],
+        "items": items,
         "page": page,
         "page_size": page_size,
         "total": total,
@@ -775,13 +1322,13 @@ def list_series(q: str = "", db_path: str | Path | None = None) -> list[dict[str
                 MAX(m.year) AS year_to,
                 (
                     SELECT p.poster_path FROM media_items p
-                     WHERE p.series_id = s.id AND p.poster_path IS NOT NULL
+                     WHERE p.series_id = s.id AND p.is_metadata = 0 AND p.poster_path IS NOT NULL
                      ORDER BY (p.tmdb_status = 'matched') DESC, p.id
                      LIMIT 1
                 ) AS poster_path,
                 s.updated_at
             FROM media_series s
-            JOIN media_items m ON m.series_id = s.id
+            JOIN media_items m ON m.series_id = s.id AND m.is_metadata = 0
             WHERE (? = '' OR s.title LIKE '%' || ? || '%')
             GROUP BY s.id
             ORDER BY media_count DESC, s.title
@@ -808,7 +1355,7 @@ def get_series(series_id: int, db_path: str | Path | None = None) -> dict[str, A
                 ) AS sample_label
             FROM media_items m
             LEFT JOIN source_records s ON s.media_id = m.id
-            WHERE m.series_id = ?
+            WHERE m.series_id = ? AND m.is_metadata = 0
             GROUP BY m.id
             ORDER BY COALESCE(m.year, 9999), m.id
             """,
@@ -846,10 +1393,15 @@ def get_media(media_id: int, db_path: str | Path | None = None) -> dict[str, Any
             """
             SELECT
                 s.*,
+                i.source_name AS import_source_name,
+                i.source_kind AS import_source_kind,
+                i.source_path AS import_source_path,
+                i.created_at AS import_created_at,
                 (SELECT e.channel_name FROM ingestion_links l JOIN ingestion_events e ON e.id = l.ingestion_id WHERE l.source_key = s.source_key ORDER BY e.received_at DESC LIMIT 1) AS channel_name,
                 (SELECT e.channel_avatar_url FROM ingestion_links l JOIN ingestion_events e ON e.id = l.ingestion_id WHERE l.source_key = s.source_key ORDER BY e.received_at DESC LIMIT 1) AS channel_avatar_url,
                 (SELECT COALESCE(e.published_at, e.received_at) FROM ingestion_links l JOIN ingestion_events e ON e.id = l.ingestion_id WHERE l.source_key = s.source_key ORDER BY e.received_at DESC LIMIT 1) AS published_at
             FROM source_records s
+            LEFT JOIN imports i ON i.id = s.import_id
             WHERE s.media_id = ?
             ORDER BY s.source_type, s.season, s.episode, s.id
             """,
@@ -1104,6 +1656,7 @@ def update_media_fields(
             [*updates.values(), media_id],
         )
         connection.execute("DELETE FROM imdb_lookups WHERE media_id = ?", (media_id,))
+        refresh_metadata_flags(connection, {media_id})
     return get_media(media_id, db_path)
 
 
@@ -1129,7 +1682,16 @@ def pending_media_ids(
         rows = connection.execute(
             """
             SELECT id FROM media_items
-            WHERE tmdb_status != 'matched' AND resource_kind != 'person' AND is_bundle = 0
+            WHERE tmdb_status != 'matched' AND resource_kind NOT IN ('person','series') AND is_bundle = 0
+              AND is_metadata = 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM source_records sm
+                  WHERE sm.media_id = media_items.id AND sm.resource_class = 'music'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM source_records sx
+                  WHERE sx.media_id = media_items.id AND sx.resource_class = 'nsfw'
+              )
               AND (? = 0 OR series_id IS NOT NULL)
             -- 顺序：待匹配 → 上次网络失败（重试有可能成功）→ 待确认 → 明确没找到。
             -- review 重跑通常还是 review，所以不能让它把 error 的补试挤掉。
@@ -1220,9 +1782,35 @@ def merge_media_items(
         "UPDATE OR IGNORE source_records SET media_id = ? WHERE media_id = ?",
         (keep_id, remove_id),
     )
+    connection.execute(
+        "UPDATE ingestion_links SET media_id = ? WHERE media_id = ?",
+        (keep_id, remove_id),
+    )
+    # 入库事件里保存的是当时的 media_ids_json；合并后必须把旧 id 改成保留 id，
+    # 否则入库历史会显示已删除的作品。只改包含 remove_id 的事件，避免全表扫描。
+    for event in connection.execute(
+        "SELECT id, media_ids_json FROM ingestion_events WHERE media_ids_json LIKE ?",
+        (f"%{remove_id}%",),
+    ).fetchall():
+        try:
+            values = json.loads(event["media_ids_json"] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(values, list) or remove_id not in values:
+            continue
+        rewritten = list(dict.fromkeys(
+            keep_id if value == remove_id else value
+            for value in values
+            if isinstance(value, int)
+        ))
+        connection.execute(
+            "UPDATE ingestion_events SET media_ids_json = ? WHERE id = ?",
+            (json.dumps(rewritten, ensure_ascii=False), event["id"]),
+        )
     connection.execute("DELETE FROM source_records WHERE media_id = ?", (remove_id,))
     connection.execute("DELETE FROM tmdb_candidates WHERE media_id = ?", (remove_id,))
     connection.execute("DELETE FROM media_items WHERE id = ?", (remove_id,))
+    refresh_metadata_flags(connection, {keep_id})
 
 
 def extract_tmdb_seasons(details: dict[str, Any]) -> list[dict[str, int]] | None:
@@ -1354,6 +1942,7 @@ def link_tmdb(
         if canonical_year is not None:
             connection.execute("UPDATE media_items SET year = ? WHERE id = ?", (canonical_year, media_id))
         connection.execute("DELETE FROM tmdb_candidates WHERE media_id = ?", (media_id,))
+        refresh_metadata_flags(connection, {media_id})
 
     return media_id
 
@@ -1373,3 +1962,4 @@ def unlink_tmdb(media_id: int, db_path: str | Path | None = None) -> None:
             """,
             (utc_now(), media_id),
         )
+        refresh_metadata_flags(connection, {media_id})

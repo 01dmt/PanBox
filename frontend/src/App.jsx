@@ -1,14 +1,14 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   getConfig,
   getMedia,
   getMediaFilters,
   getMediaDetail,
   getResources,
+  getResourceGroup,
   getResourceFilters,
   getResourceDetail,
-  getSeries,
-  getSeriesDetail,
   updateResource,
   checkResource,
   getStats,
@@ -25,58 +25,92 @@ import StatsBar from "./components/StatsBar";
 import Dashboard from "./components/Dashboard";
 import FilterToolbar from "./components/FilterToolbar";
 import MediaTable from "./components/MediaTable";
+import PendingView from "./components/PendingView";
 import Inspector from "./components/Inspector";
 import ImportView from "./components/ImportView";
 import SettingsView from "./components/SettingsView";
 import MobileNav from "./components/MobileNav";
-import ShareAuditStatus from "./components/ShareAuditStatus";
 import Re0HeroCarousel from "./components/Re0HeroCarousel";
 import Re0CatalogBrowser from "./components/Re0CatalogBrowser";
 import Re0PosterGrid from "./components/Re0PosterGrid";
 import Re0MovieDetail from "./components/Re0MovieDetail";
 import ResourceLibrary, { PersonResources, ResourceDetail } from "./components/ResourceLibrary";
-import SeriesBrowser from "./components/SeriesBrowser";
 import ResourceFilterToolbar from "./components/ResourceFilterToolbar";
+import {
+  RESOURCE_DEFAULTS,
+  defaultMediaFilters,
+  isCatalogView,
+  readMediaFilters,
+  readResourceFilters,
+  readSelectionId,
+  withMediaFilters,
+  withResourceFilters,
+} from "./urlState";
 
 
 const DATA_VIEWS = new Set(["library", "movies", "tv", "resources", "pending", "duplicates"]);
 
-const DEFAULT_FILTERS = {
-  status: "all",
-  type: "movie",
-  category: "all",
-  resource_kind: "all",
-  source: "all",
-  availability: "available",
-  year: "all",
-  genre: "all",
-  country: "all",
-  quality: "all",
-  codec: "all",
-  hdr: "all",
-  sort: "updated_desc",
-  page: 1,
-  pageSize: 36,
-};
+const VIEW_PATHS = Object.freeze({
+  movies: "/movies",
+  tv: "/tv",
+  library: "/library",
+  resources: "/resources",
+  pending: "/pending",
+  duplicates: "/duplicates",
+  imports: "/imports",
+  dashboard: "/dashboard",
+  settings: "/settings",
+});
 
-const DEFAULT_RESOURCE_FILTERS = {
-  group: "all",
-  resource_class: "all",
-  provider: "all",
-  availability: "all",
-  tmdb_status: "all",
-  year: "all",
-  tag: "all",
-  quality: "all",
-  channel: "all",
-  updated: "all",
-  sort: "updated_desc",
-  page: 1,
-  pageSize: 30,
-};
+const PATH_VIEWS = Object.freeze(
+  Object.fromEntries(Object.entries(VIEW_PATHS).map(([view, path]) => [path, view])),
+);
+
+const DEFAULT_VIEW = "movies";
+const IMPORT_STATUS_VALUES = new Set(["all", "imported", "failed", "duplicate", "ignored"]);
 
 
 export default function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const setSearchParamsRef = useRef(setSearchParams);
+  useEffect(() => {
+    setSearchParamsRef.current = setSearchParams;
+  }, [setSearchParams]);
+  const view = PATH_VIEWS[location.pathname] ?? DEFAULT_VIEW;
+  const mediaFilterKey = useMemo(() => {
+    const params = new URLSearchParams(searchParams);
+    ["q", "media", "resource", "group_id"].forEach((key) => params.delete(key));
+    return params.toString();
+  }, [searchParams]);
+  const resourceFilterKey = useMemo(() => {
+    const params = new URLSearchParams(searchParams);
+    ["q", "media", "resource", "group_id"].forEach((key) => params.delete(key));
+    return params.toString();
+  }, [searchParams]);
+  const filters = useMemo(() => readMediaFilters(new URLSearchParams(mediaFilterKey), view), [mediaFilterKey, view]);
+  const resourceFilters = useMemo(() => readResourceFilters(new URLSearchParams(resourceFilterKey)), [resourceFilterKey]);
+  const search = searchParams.get("q") ?? "";
+  const [debouncedSearch, setDebouncedSearch] = useState(search);
+  useEffect(() => {
+    if (!search) {
+      setDebouncedSearch("");
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  const mediaParam = readSelectionId(searchParams, "media");
+  const resourceParam = readSelectionId(searchParams, "resource");
+  const selectedGroupId = searchParams.get("group_id") || null;
+  const [groupDetail, setGroupDetail] = useState(null);
+  const [groupDetailLoading, setGroupDetailLoading] = useState(false);
+  const [autoSelectedId, setAutoSelectedId] = useState(null);
+  const [autoSelectedResourceId, setAutoSelectedResourceId] = useState(null);
+  const selectedId = mediaParam ?? autoSelectedId;
+  const selectedMediaDetailId = isCatalogView(view) ? mediaParam : null;
+  const selectedResourceId = resourceParam ?? autoSelectedResourceId;
   const [theme, setTheme] = useState(() => {
     try {
       const saved = localStorage.getItem("panbox-theme");
@@ -84,22 +118,13 @@ export default function App() {
     } catch {}
     return "dark";
   });
-  const [view, setView] = useState("movies");
-  const [filters, setFilters] = useState(DEFAULT_FILTERS);
-  const [resourceFilters, setResourceFilters] = useState(DEFAULT_RESOURCE_FILTERS);
-  const [search, setSearch] = useState("");
-  const deferredSearch = useDeferredValue(search);
   const [stats, setStats] = useState(null);
   const [config, setConfig] = useState(null);
   const [filterOptions, setFilterOptions] = useState(null);
   const [resourceFilterOptions, setResourceFilterOptions] = useState(null);
   const [pageData, setPageData] = useState({ items: [], total: 0, page: 1, pages: 1 });
   const [resourcePageData, setResourcePageData] = useState({ items: [], total: 0, page: 1, pages: 1, summary: {} });
-  const [selectedId, setSelectedId] = useState(null);
-  const [selectedMediaDetailId, setSelectedMediaDetailId] = useState(null);
   const [selectedItem, setSelectedItem] = useState(null);
-  const [selectedResourceId, setSelectedResourceId] = useState(null);
-  const [selectedPersonId, setSelectedPersonId] = useState(null);
   const [selectedResource, setSelectedResource] = useState(null);
   const [resourceLayoutMode, setResourceLayoutMode] = useState(() => {
     try {
@@ -108,12 +133,6 @@ export default function App() {
       return "table";
     }
   });
-  const [seriesItems, setSeriesItems] = useState([]);
-  const [seriesQuery, setSeriesQuery] = useState("");
-  const [selectedSeriesId, setSelectedSeriesId] = useState(null);
-  const [seriesDetail, setSeriesDetail] = useState(null);
-  const [seriesLoading, setSeriesLoading] = useState(false);
-  const [seriesDetailLoading, setSeriesDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [resourceDetailLoading, setResourceDetailLoading] = useState(false);
@@ -123,10 +142,30 @@ export default function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [manualImportOpen, setManualImportOpen] = useState(false);
+  const importStatus = IMPORT_STATUS_VALUES.has(searchParams.get("status") || "all")
+    ? (searchParams.get("status") || "all")
+    : "all";
   const searchRef = useRef(null);
   const mediaRequestRef = useRef(0);
   const mediaAbortRef = useRef(null);
-  const lastDataViewRef = useRef("library");
+  const viewRef = useRef(view);
+
+  const replaceParams = useCallback((build, { replace = true } = {}) => {
+    setSearchParamsRef.current((current) => build(new URLSearchParams(current)), { replace });
+  }, []);
+
+  const changeImportStatus = useCallback((status) => {
+    replaceParams((current) => {
+      if (status && status !== "all") current.set("status", status);
+      else current.delete("status");
+      return current;
+    });
+  }, [replaceParams]);
+
+  useEffect(() => {
+    // 深链接里带 resource 时直接打开来源详情；query 移除后同步关闭弹窗。
+    setMobileInspectorOpen(Boolean(resourceParam));
+  }, [resourceParam]);
 
   const effectiveParams = useMemo(() => {
     const isCatalog = ["library", "movies", "tv"].includes(view);
@@ -138,7 +177,7 @@ export default function App() {
       : filters.type;
 
     return {
-      q: deferredSearch,
+      q: debouncedSearch,
       status,
       type,
       category: view === "tv" ? (filters.category || "all") : "all",
@@ -156,15 +195,24 @@ export default function App() {
       page_size: filters.pageSize,
       multi_source: view === "duplicates",
     };
-  }, [deferredSearch, filters, view]);
+  }, [debouncedSearch, filters, view]);
 
   const loadSummary = useCallback(async () => {
-    const [nextStats, nextConfig, nextOptions, nextResourceOptions] = await Promise.all([getStats(), getConfig(), getMediaFilters(), getResourceFilters()]);
+    const [nextStats, nextConfig, nextOptions] = await Promise.all([getStats(), getConfig(), getMediaFilters()]);
     setStats(nextStats);
     setConfig(nextConfig);
     setFilterOptions(nextOptions);
-    setResourceFilterOptions(nextResourceOptions);
   }, []);
+
+  const loadResourceOptions = useCallback(async () => {
+    const nextOptions = await getResourceFilters();
+    setResourceFilterOptions(nextOptions);
+  }, []);
+
+  useEffect(() => {
+    if (view !== "resources" || resourceFilterOptions) return;
+    loadResourceOptions().catch((nextError) => setError(nextError.message));
+  }, [loadResourceOptions, resourceFilterOptions, view]);
 
   const loadMedia = useCallback(async () => {
     if (!DATA_VIEWS.has(view) || view === "resources") return;
@@ -177,11 +225,11 @@ export default function App() {
       const result = await getMedia(effectiveParams, controller.signal);
       if (requestId !== mediaRequestRef.current) return;
       if (result.page > result.pages) {
-        setFilters((current) => ({ ...current, page: result.pages }));
+        replaceParams((current) => withMediaFilters(current, { ...filters, page: result.pages }, view));
         return;
       }
       setPageData(result);
-      setSelectedId((current) => {
+      setAutoSelectedId((current) => {
         if (result.items.some((item) => item.id === current)) return current;
         return result.items[0]?.id ?? null;
       });
@@ -191,10 +239,10 @@ export default function App() {
     } finally {
       if (requestId === mediaRequestRef.current) setLoading(false);
     }
-  }, [effectiveParams, view]);
+  }, [effectiveParams, filters, replaceParams, view]);
 
   const resourceParams = useMemo(() => ({
-    q: deferredSearch,
+    q: debouncedSearch,
     resource_group: resourceFilters.group,
     resource_class: resourceFilters.resource_class,
     provider: resourceFilters.provider,
@@ -208,67 +256,18 @@ export default function App() {
     sort: resourceFilters.sort,
     page: resourceFilters.page,
     page_size: resourceFilters.pageSize,
-    aggregate: resourceFilters.group === "person" ? "person" : "",
-  }), [deferredSearch, resourceFilters]);
+    aggregate: ["person", "series"].includes(resourceFilters.group) ? resourceFilters.group : "",
+    include_resources: false,
+  }), [debouncedSearch, resourceFilters]);
 
-  const activePerson = useMemo(
-    () => (selectedPersonId ? resourcePageData.items.find((item) => item.id === selectedPersonId) ?? null : null),
-    [resourcePageData, selectedPersonId],
-  );
+  const activeGroup = useMemo(() => {
+    if (!selectedGroupId) return null;
+    if (groupDetail?.id === selectedGroupId) return groupDetail;
+    return resourcePageData.items.find((item) => item.id === selectedGroupId) ?? null;
+  }, [groupDetail, resourcePageData, selectedGroupId]);
 
-  useEffect(() => {
-    // 筛选、搜索或翻页变化时退出人物详情，回到人物列表。
-    setSelectedPersonId(null);
-  }, [resourceParams]);
 
-  const loadSeries = useCallback(async () => {
-    if (view !== "series") return;
-    setSeriesLoading(true);
-    try {
-      const result = await getSeries();
-      const items = result.items || [];
-      setSeriesItems(items);
-      setSelectedSeriesId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? null));
-      setError("");
-    } catch (nextError) {
-      setError(nextError.message);
-    } finally {
-      setSeriesLoading(false);
-    }
-  }, [view]);
 
-  useEffect(() => {
-    loadSeries();
-  }, [loadSeries]);
-
-  useEffect(() => {
-    // 系列详情按选中项单独加载；切视图时清空，避免旧系列残留在右侧面板。
-    if (view !== "series" || !selectedSeriesId) {
-      setSeriesDetail(null);
-      return undefined;
-    }
-    let cancelled = false;
-    setSeriesDetailLoading(true);
-    getSeriesDetail(selectedSeriesId)
-      .then((detail) => {
-        if (!cancelled) setSeriesDetail(detail);
-      })
-      .catch((nextError) => {
-        if (!cancelled) setError(nextError.message);
-      })
-      .finally(() => {
-        if (!cancelled) setSeriesDetailLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [view, selectedSeriesId]);
-
-  const visibleSeries = useMemo(() => {
-    const needle = seriesQuery.trim().toLowerCase();
-    if (!needle) return seriesItems;
-    return seriesItems.filter((item) => String(item.title || "").toLowerCase().includes(needle));
-  }, [seriesItems, seriesQuery]);
 
   const loadResources = useCallback(async () => {
     if (view !== "resources") return;
@@ -281,11 +280,11 @@ export default function App() {
       const result = await getResources(resourceParams, controller.signal);
       if (requestId !== mediaRequestRef.current) return;
       if (result.page > result.pages) {
-        setResourceFilters((current) => ({ ...current, page: result.pages }));
+        replaceParams((current) => withResourceFilters(current, { ...resourceFilters, page: result.pages }));
         return;
       }
       setResourcePageData(result);
-      setSelectedResourceId((current) => {
+      setAutoSelectedResourceId((current) => {
         const contains = result.items.some((item) => item.resources
           ? item.resources.some((resource) => resource.id === current)
           : item.id === current);
@@ -298,7 +297,7 @@ export default function App() {
     } finally {
       if (requestId === mediaRequestRef.current) setLoading(false);
     }
-  }, [resourceParams, view]);
+  }, [replaceParams, resourceFilters, resourceParams, view]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -326,7 +325,36 @@ export default function App() {
   }, [loadResources]);
 
   useEffect(() => {
-    if (!selectedId || !DATA_VIEWS.has(view) || view === "resources") {
+    if (!selectedGroupId) {
+      setGroupDetail(null);
+      setGroupDetailLoading(false);
+      return undefined;
+    }
+    if (groupDetail?.id === selectedGroupId) return undefined;
+    const controller = new AbortController();
+    let active = true;
+    setGroupDetailLoading(true);
+    getResourceGroup(selectedGroupId, resourceParams, controller.signal)
+      .then((item) => {
+        if (!active) return;
+        setGroupDetail(item);
+        setAutoSelectedResourceId(item.resources?.[0]?.id ?? null);
+        setError("");
+      })
+      .catch((nextError) => {
+        if (active && nextError.name !== "AbortError") setError(nextError.message);
+      })
+      .finally(() => {
+        if (active) setGroupDetailLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [groupDetail, resourceParams, selectedGroupId]);
+
+  useEffect(() => {
+    if (!selectedId || !DATA_VIEWS.has(view) || view === "resources" || isCatalogView(view)) {
       setSelectedItem(null);
       return undefined;
     }
@@ -349,19 +377,29 @@ export default function App() {
   }, [selectedId, view]);
 
   useEffect(() => {
-    if (!selectedResourceId || view !== "resources") {
+    if (!resourceParam || view !== "resources") {
       setSelectedResource(null);
       return undefined;
     }
     let active = true;
     setSelectedResource(null);
     setResourceDetailLoading(true);
-    getResourceDetail(selectedResourceId)
+    getResourceDetail(resourceParam)
       .then((item) => { if (active) setSelectedResource(item); })
       .catch((nextError) => { if (active) setError(nextError.message); })
       .finally(() => { if (active) setResourceDetailLoading(false); });
     return () => { active = false; };
-  }, [selectedResourceId, view]);
+  }, [resourceParam, view]);
+
+  const closeDetails = useCallback(() => {
+    setMobileInspectorOpen(false);
+    setAutoSelectedResourceId(null);
+    replaceParams((current) => {
+      current.delete("media");
+      current.delete("resource");
+      return current;
+    });
+  }, [replaceParams]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -369,83 +407,118 @@ export default function App() {
         event.preventDefault();
         searchRef.current?.focus();
       }
-      if (event.key === "Escape") {
-        setMobileInspectorOpen(false);
-        setSelectedMediaDetailId(null);
-        setSelectedResourceId(null);
-      }
+      if (event.key === "Escape") closeDetails();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [closeDetails]);
 
-  const changeView = useCallback((nextView) => {
-    setView(nextView);
-    setSelectedMediaDetailId(null);
-    setManualImportOpen(false);
-    const isCatalog = ["library", "movies", "tv"].includes(nextView);
-    if (DATA_VIEWS.has(nextView) && nextView !== lastDataViewRef.current) {
-      lastDataViewRef.current = nextView;
-      const type = nextView === "movies" ? "movie" : nextView === "tv" ? "tv" : "all";
-      setFilters((current) => ({
-        ...DEFAULT_FILTERS,
-        type,
-        availability: isCatalog ? "available" : "all",
-        pageSize: current.pageSize,
-      }));
-      setResourceFilters((current) => ({ ...DEFAULT_RESOURCE_FILTERS, pageSize: current.pageSize }));
-      setSearch("");
-    } else {
-      if (nextView === "movies") {
-        setFilters((current) => ({ ...current, type: "movie", category: "all", page: 1 }));
-      } else if (nextView === "tv") {
-        setFilters((current) => ({ ...current, type: "tv", category: "all", page: 1 }));
-      } else {
-        setFilters((current) => ({ ...current, page: 1 }));
-      }
+  const applyView = useCallback((nextView) => {
+    const previousView = viewRef.current;
+    viewRef.current = nextView;
+    if (previousView !== nextView) {
+      setAutoSelectedId(null);
+      setAutoSelectedResourceId(null);
+      setSelectedItem(null);
+      setSelectedResource(null);
     }
+    setManualImportOpen(false);
     setMobileInspectorOpen(false);
     setNotice("");
     setError("");
   }, []);
 
+  // URL 是页面视图的唯一来源；浏览器前进/后退和直接打开深链接都走这里。
+  useEffect(() => {
+    const routeView = PATH_VIEWS[location.pathname];
+    if (!routeView) {
+      navigate(VIEW_PATHS[DEFAULT_VIEW], { replace: true });
+      if (viewRef.current !== DEFAULT_VIEW) applyView(DEFAULT_VIEW);
+      return;
+    }
+    if (viewRef.current !== routeView) applyView(routeView);
+  }, [location.pathname, navigate, applyView]);
+
+  const changeView = useCallback((nextView) => {
+    const path = VIEW_PATHS[nextView];
+    if (!path) return;
+    applyView(nextView);
+    if (viewRef.current === nextView && PATH_VIEWS[location.pathname] === nextView) {
+      // 重复点击当前导航项：保留筛选，回到第一页并关闭详情。
+      replaceParams((current) => {
+        current.delete("page");
+        current.delete("media");
+        current.delete("resource");
+        current.delete("group_id");
+        return current;
+      }, { replace: true });
+      return;
+    }
+    // 切换页面时清空 query，使用新页面的默认筛选。
+    navigate(path);
+  }, [applyView, location.pathname, navigate, replaceParams]);
+
   const changeFilters = useCallback((patch) => {
-    setFilters((current) => ({ ...current, ...patch, page: patch.page ?? 1 }));
+    const next = { ...filters, ...patch, page: patch.page ?? 1 };
+    replaceParams((current) => withMediaFilters(current, next, view));
     setMobileInspectorOpen(false);
-  }, []);
+  }, [filters, replaceParams, view]);
 
   const handleSearch = useCallback((value) => {
-    setSearch(value);
-    setFilters((current) => (current.page === 1 ? current : { ...current, page: 1 }));
-    setResourceFilters((current) => (current.page === 1 ? current : { ...current, page: 1 }));
-  }, []);
+    replaceParams((current) => {
+      if (value) current.set("q", value);
+      else current.delete("q");
+      // 搜索条件变化后回到第一页，并退出不再匹配的详情。
+      current.delete("page");
+      current.delete("media");
+      current.delete("resource");
+      current.delete("group_id");
+      return current;
+    });
+    setAutoSelectedId(null);
+    setAutoSelectedResourceId(null);
+  }, [replaceParams]);
 
   const changeResourceFilters = useCallback((patch) => {
-    setResourceFilters((current) => ({ ...current, ...patch, page: patch.page ?? 1 }));
+    const next = { ...resourceFilters, ...patch, page: patch.page ?? 1 };
+    replaceParams((current) => withResourceFilters(current, next));
+    setAutoSelectedResourceId(null);
     setMobileInspectorOpen(false);
-  }, []);
+  }, [replaceParams, resourceFilters]);
 
   const clearFilters = useCallback(() => {
-    setFilters((current) => ({ ...DEFAULT_FILTERS, availability: "all", pageSize: current.pageSize }));
-    setSearch("");
+    const next = { ...defaultMediaFilters(view), availability: "all", pageSize: filters.pageSize };
+    replaceParams((current) => {
+      const nextParams = withMediaFilters(current, next, view);
+      nextParams.delete("q");
+      return nextParams;
+    });
     setMobileInspectorOpen(false);
-  }, []);
+  }, [filters.pageSize, replaceParams, view]);
 
   const clearResourceFilters = useCallback(() => {
-    setResourceFilters((current) => ({ ...DEFAULT_RESOURCE_FILTERS, group: current.group, pageSize: current.pageSize }));
-    setSearch("");
+    const next = { ...RESOURCE_DEFAULTS, group: resourceFilters.group, pageSize: resourceFilters.pageSize };
+    replaceParams((current) => {
+      const nextParams = withResourceFilters(current, next);
+      nextParams.delete("q");
+      return nextParams;
+    });
+    setAutoSelectedResourceId(null);
     setMobileInspectorOpen(false);
-  }, []);
+  }, [replaceParams, resourceFilters.group, resourceFilters.pageSize]);
 
   const refreshAfterChange = useCallback(
     async (item) => {
       if (item?.id) {
-        setSelectedId(item.id);
+        setAutoSelectedId(item.id);
         setSelectedItem(item);
       }
-      await Promise.all([loadSummary(), loadMedia(), loadResources()]);
+      setGroupDetail(null);
+      const requests = [loadSummary(), loadMedia(), loadResources()];
+      if (view === "resources") requests.push(loadResourceOptions());
+      await Promise.all(requests);
     },
-    [loadMedia, loadResources, loadSummary],
+    [loadMedia, loadResourceOptions, loadResources, loadSummary, view],
   );
 
   const handleSearchCandidates = useCallback(async () => {
@@ -468,18 +541,6 @@ export default function App() {
       setError(nextError.message);
     } finally {
       setDetailLoading(false);
-    }
-  }, [refreshAfterChange, selectedId]);
-
-  const handleAuditedSources = useCallback(async () => {
-    let item;
-    if (selectedId) {
-      try { item = await getMediaDetail(selectedId); } catch { /* The audit may have removed this item. */ }
-    }
-    try {
-      await refreshAfterChange(item);
-    } catch (nextError) {
-      setError(nextError.message);
     }
   }, [refreshAfterChange, selectedId]);
 
@@ -551,13 +612,15 @@ export default function App() {
         + (result.removed_sources ? `已清理 ${result.removed_sources} 条已取消分享、${result.removed || 0} 条无来源记录。` : ""),
       );
       setError("");
-      await Promise.all([loadSummary(), loadMedia(), loadResources()]);
+      const requests = [loadSummary(), loadMedia(), loadResources()];
+      if (view === "resources") requests.push(loadResourceOptions());
+      await Promise.all(requests);
     } catch (nextError) {
       setError(nextError.message);
     } finally {
       setSyncing(false);
     }
-  }, [loadMedia, loadResources, loadSummary]);
+  }, [loadMedia, loadResourceOptions, loadResources, loadSummary, view]);
 
   const handleResourceCheck = useCallback(async (resourceId) => {
     try {
@@ -565,13 +628,13 @@ export default function App() {
       const item = await checkResource(resourceId);
       setSelectedResource(item);
       setNotice(item.availability_status === "available" ? "来源检查完成，分享可用。" : "来源检查完成，请查看当前状态。 ");
-      await Promise.all([loadSummary(), loadResources()]);
+      await Promise.all([loadSummary(), loadResources(), loadResourceOptions()]);
     } catch (nextError) {
       setError(nextError.message);
     } finally {
       setCheckingResourceId(null);
     }
-  }, [loadResources, loadSummary]);
+  }, [loadResourceOptions, loadResources, loadSummary]);
 
   const handleResourceUpdate = useCallback(async (values) => {
     if (!selectedResourceId) return;
@@ -579,11 +642,11 @@ export default function App() {
       const item = await updateResource(selectedResourceId, values);
       setSelectedResource(item);
       setNotice("资源信息已更新。 ");
-      await Promise.all([loadSummary(), loadResources()]);
+      await Promise.all([loadSummary(), loadResources(), loadResourceOptions()]);
     } catch (nextError) {
       setError(nextError.message);
     }
-  }, [loadResources, loadSummary, selectedResourceId]);
+  }, [loadResourceOptions, loadResources, loadSummary, selectedResourceId]);
 
   const handleResourceAction = useCallback(async (resourceId, action) => {
     try {
@@ -600,29 +663,71 @@ export default function App() {
     }
   }, [selectedResource]);
 
+  const closeMediaDetail = useCallback(() => {
+    replaceParams((current) => {
+      current.delete("media");
+      return current;
+    });
+  }, [replaceParams]);
+
+  const closeResourceDetail = useCallback(() => {
+    setAutoSelectedResourceId(null);
+    replaceParams((current) => {
+      current.delete("resource");
+      return current;
+    });
+  }, [replaceParams]);
+
+  const openMediaDetail = useCallback((mediaId) => {
+    replaceParams((current) => {
+      current.set("media", String(mediaId));
+      return current;
+    }, { replace: false });
+  }, [replaceParams]);
+
   const selectItem = useCallback((mediaId) => {
-    setSelectedId(mediaId);
+    replaceParams((current) => {
+      current.set("media", String(mediaId));
+      return current;
+    }, { replace: false });
     setMobileInspectorOpen(true);
-  }, []);
+  }, [replaceParams]);
 
   const selectResource = useCallback((resourceId) => {
-    setSelectedResourceId(resourceId);
+    replaceParams((current) => {
+      current.set("resource", String(resourceId));
+      return current;
+    }, { replace: false });
     setMobileInspectorOpen(true);
-  }, []);
+  }, [replaceParams]);
 
-  const openPerson = useCallback((personId) => {
-    setSelectedPersonId(personId);
-    // 进入人物详情时默认选中其第一个来源，右侧详情与所看人物保持一致。
-    const group = resourcePageData.items.find((item) => item.id === personId);
-    const first = group?.resources?.[0]?.id;
-    if (first) setSelectedResourceId(first);
-  }, [resourcePageData]);
+  const openGroup = useCallback((groupId) => {
+    setGroupDetail(null);
+    setAutoSelectedResourceId(null);
+    replaceParams((current) => {
+      current.set("group_id", groupId);
+      current.delete("resource");
+      return current;
+    }, { replace: false });
+  }, [replaceParams]);
+
+  const closeGroup = useCallback(() => {
+    setGroupDetail(null);
+    setGroupDetailLoading(false);
+    setAutoSelectedResourceId(null);
+    replaceParams((current) => {
+      current.delete("group_id");
+      current.delete("resource");
+      return current;
+    });
+  }, [replaceParams]);
 
   const openResourceMedia = useCallback((mediaId) => {
     if (!mediaId) return;
-    changeView("movies");
-    setSelectedMediaDetailId(mediaId);
-  }, [changeView]);
+    applyView("movies");
+    const params = new URLSearchParams({ media: String(mediaId) });
+    navigate(`${VIEW_PATHS.movies}?${params}`);
+  }, [applyView, navigate]);
 
   return (
     <div className="app-shell" data-theme={theme}>
@@ -637,15 +742,13 @@ export default function App() {
         onSync={handleSync}
         onManualImport={() => setManualImportOpen(true)}
       />
-      <div className={`app-main ${["resources", "series"].includes(view) ? "app-main-resources" : ["library", "movies", "tv"].includes(view) ? "app-main-library" : ""}`}>
-        {!["library", "movies", "tv", "series", "resources"].includes(view) && <Topbar
+      <div className={`app-main ${view === "resources" ? "app-main-resources" : ["library", "movies", "tv"].includes(view) ? "app-main-library" : ""}`}>
+        {!["library", "movies", "tv", "resources", "pending", "dashboard", "imports"].includes(view) && <Topbar
           view={view}
           search={search}
           onSearch={handleSearch}
           onSubmitSearch={() => {
-            setSearch(search.trim());
-            setFilters((current) => ({ ...current, page: 1 }));
-            setResourceFilters((current) => ({ ...current, page: 1 }));
+            handleSearch(search.trim());
             setMobileInspectorOpen(false);
           }}
           searchRef={searchRef}
@@ -654,7 +757,6 @@ export default function App() {
           onManualImport={() => setManualImportOpen(true)}
         />}
 
-        {view !== "dashboard" && !["library", "movies", "tv", "series"].includes(view) && view !== "resources" ? <ShareAuditStatus onSourcesChanged={handleAuditedSources} /> : null}
         {error ? (
           <div className="message-banner error" role="alert">
             {error}
@@ -668,13 +770,57 @@ export default function App() {
           </div>
         ) : null}
 
-        {view === "dashboard" ? <Dashboard stats={stats} onPending={() => changeView("pending")} /> : null}
+        {view === "dashboard" ? (
+          <Dashboard
+            onPending={() => changeView("pending")}
+            onReview={() => {
+              applyView("pending");
+              navigate(`${VIEW_PATHS.pending}?status=review`);
+            }}
+            onResources={() => changeView("resources")}
+            onImports={(status) => {
+              applyView("imports");
+              const params = new URLSearchParams();
+              if (status && status !== "all") params.set("status", status);
+              const query = params.toString();
+              navigate(`${VIEW_PATHS.imports}${query ? `?${query}` : ""}`);
+            }}
+          />
+        ) : null}
 
-        {["library", "movies", "tv"].includes(view) ? (
+        {view === "pending" ? (
+          <PendingView
+            stats={stats}
+            filters={filters}
+            options={filterOptions}
+            search={search}
+            searchRef={searchRef}
+            pageData={pageData}
+            loading={loading}
+            selectedId={selectedId}
+            selectedItem={selectedItem}
+            detailLoading={detailLoading}
+            tmdbConfigured={Boolean(config?.tmdb_configured)}
+            mobileInspectorOpen={mobileInspectorOpen}
+            syncing={syncing}
+            onSearch={handleSearch}
+            onChangeFilters={changeFilters}
+            onClearSearch={() => handleSearch("")}
+            onRefresh={() => refreshAfterChange().catch((nextError) => setError(nextError.message))}
+            onSelect={selectItem}
+            onCloseInspector={() => setMobileInspectorOpen(false)}
+            onSync={handleSync}
+            onSearchCandidates={handleSearchCandidates}
+            onLink={handleLink}
+            onReject={handleReject}
+            onUnlink={handleUnlink}
+            onUpdate={handleUpdate}
+          />
+        ) : ["library", "movies", "tv"].includes(view) ? (
           selectedMediaDetailId ? (
             <Re0MovieDetail
               mediaId={selectedMediaDetailId}
-              onClose={() => setSelectedMediaDetailId(null)}
+              onClose={closeMediaDetail}
               onLink={handleLink}
               onUnlink={handleUnlink}
               onSearchCandidates={handleSearchCandidates}
@@ -684,9 +830,9 @@ export default function App() {
             />
           ) : (
             <main className="cinematic-library">
-              <Re0HeroCarousel items={pageData.items} mode={view === "tv" ? "tv" : "movie"} onOpen={(id) => setSelectedMediaDetailId(id)} />
+              <Re0HeroCarousel items={pageData.items} mode={view === "tv" ? "tv" : "movie"} onOpen={openMediaDetail} />
               <Re0CatalogBrowser filters={filters} options={filterOptions} total={pageData.total} mode={view === "tv" ? "tv" : "movie"} search={search} onChange={changeFilters} onSearch={handleSearch} onReset={clearFilters} />
-              <Re0PosterGrid items={pageData.items} loading={loading} selectedId={selectedId} mode={view === "tv" ? "tv" : "movie"} onSelect={(id) => setSelectedMediaDetailId(id)} page={pageData.page} pages={pageData.pages} total={pageData.total} pageSize={filters.pageSize} onPageChange={(page) => changeFilters({ page })} onPageSizeChange={(pageSize) => changeFilters({ pageSize })} onClearFilters={clearFilters} />
+              <Re0PosterGrid items={pageData.items} loading={loading} selectedId={selectedId} mode={view === "tv" ? "tv" : "movie"} onSelect={openMediaDetail} page={pageData.page} pages={pageData.pages} total={pageData.total} pageSize={filters.pageSize} onPageChange={(page) => changeFilters({ page })} onPageSizeChange={(pageSize) => changeFilters({ pageSize })} onClearFilters={clearFilters} />
               {mobileInspectorOpen && <div className="cinema-drawer-backdrop" onClick={() => setMobileInspectorOpen(false)} />}
               <div className={`cinema-drawer ${mobileInspectorOpen ? "open" : ""}`}><Inspector readOnly item={selectedItem} sourceIds={pageData.items.find((item) => item.id === selectedId)?.matched_source_ids} loading={detailLoading} tmdbConfigured={Boolean(config?.tmdb_configured)} mobileOpen={mobileInspectorOpen} onClose={() => setMobileInspectorOpen(false)} onSearch={handleSearchCandidates} onLink={handleLink} onReject={handleReject} onUnlink={handleUnlink} onUpdate={handleUpdate} /></div>
             </main>
@@ -720,10 +866,11 @@ export default function App() {
                   role="tabpanel"
                   aria-labelledby={`resource-tab-${resourceFilters.group}`}
                 >
-                  {activePerson ? (
+                  {activeGroup ? (
                     <PersonResources
-                      group={activePerson}
-                      onBack={() => setSelectedPersonId(null)}
+                      group={activeGroup}
+                      loading={groupDetailLoading}
+                      onBack={closeGroup}
                       selectedId={selectedResourceId}
                       onSelect={selectResource}
                       onAction={handleResourceAction}
@@ -734,7 +881,7 @@ export default function App() {
                     <ResourceLibrary
                       items={resourcePageData.items}
                       loading={loading}
-                      grouped={resourcePageData.aggregated === "person"}
+                      grouped={resourcePageData.aggregated}
                       selectedId={selectedResourceId}
                       onSelect={selectResource}
                       total={resourcePageData.total}
@@ -748,14 +895,14 @@ export default function App() {
                       checkingId={checkingResourceId}
                       summary={resourcePageData.summary}
                       onClearFilters={clearResourceFilters}
-                      onOpenPerson={openPerson}
+                      onOpenGroup={openGroup}
                     />
                   )}
                   <ResourceDetail
                     item={selectedResource}
                     loading={resourceDetailLoading}
                     onClose={() => {
-                      setSelectedResourceId(null);
+                      closeResourceDetail();
                       setMobileInspectorOpen(false);
                     }}
                     onAction={(resourceId, action) =>
@@ -783,7 +930,7 @@ export default function App() {
                   total={pageData.total}
                   onChange={changeFilters}
                   onReset={clearFilters}
-                  onClearSearch={() => { setSearch(""); changeFilters({}); }}
+                  onClearSearch={() => handleSearch("")}
                   onRefresh={() => refreshAfterChange().catch((nextError) => setError(nextError.message))}
                 />
                 <MediaTable
@@ -818,22 +965,12 @@ export default function App() {
           </>
         ) : null}
 
-        {view === "series" ? (
-          <SeriesBrowser
-            items={visibleSeries}
-            loading={seriesLoading}
-            detail={seriesDetail}
-            detailLoading={seriesDetailLoading}
-            selectedId={selectedSeriesId}
-            onSelect={setSelectedSeriesId}
-            query={seriesQuery}
-            onQuery={setSeriesQuery}
-            onOpenMedia={openResourceMedia}
-          />
-        ) : null}
 
         {view === "imports" ? (
           <ImportView
+            initialStatus={importStatus}
+            status={importStatus}
+            onStatusChange={changeImportStatus}
             manualOpen={manualImportOpen}
             onCloseManual={() => setManualImportOpen(false)}
             onImported={async (result) => {

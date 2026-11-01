@@ -56,6 +56,26 @@ class SeriesGroupingTests(unittest.TestCase):
         self.assertEqual(row["is_bundle"], 1)
         self.assertNotIn(int(row["id"]), pending_media_ids(10, self.db_path))
 
+    def test_series_heading_with_ed2k_uses_each_filename_as_a_film(self) -> None:
+        import_content(
+            "📺 聊斋艳谭（系列）\n"
+            "ed2k://|file|山中艳谭（完整版）.1995.LDRip.2AC3.HKFACT_prob3.mp4|"
+            "6955916275|1B85B53629F4F596AFE87E1B14E7EFA8|/\n"
+            "ed2k://|file|www.98T.la@聊斋之艳蛇 (1994) 1080p AC3.mkv|"
+            "10385530513|DB120387C374564F9E791E46F81FB2E6|/",
+            "test.txt",
+            db_path=self.db_path,
+        )
+        series = list_series(db_path=self.db_path)
+        self.assertEqual(len(series), 1)
+        self.assertEqual(series[0]["title"], "聊斋艳谭")
+        self.assertEqual(series[0]["media_count"], 2)
+        detail = get_series(series[0]["id"], self.db_path)
+        self.assertEqual(
+            [(item["title"], item["year"]) for item in detail["items"]],
+            [("聊斋之艳蛇", 1994), ("山中艳谭（完整版）", 1995)],
+        )
+
     def test_a_single_film_with_a_filename_is_still_matchable(self) -> None:
         # 同一频道也会一集/一部一条 ED2K：文件名能认出是哪一部，照常参与匹配。
         import_content(
